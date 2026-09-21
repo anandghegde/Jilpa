@@ -24,6 +24,9 @@ public enum CoordinatorEvent: Sendable {
   case gone(DialogSession.ID)
   /// The first reading, and every change after it.
   case updated(ObservedDialog)
+  /// The dialog's frame changed, or the window a sheet hangs from moved. Nothing about the
+  /// session changed and no reading is due: this says only that the strip goes somewhere else.
+  case moved(DialogSession.ID)
   /// Destroyed. The outcome is not known yet.
   case closed(ObservedDialog)
   case ended(ObservedDialog)
@@ -176,6 +179,12 @@ public actor DialogCoordinator {
     .valueChanged, .selectedChildrenChanged, .selectedRowsChanged,
   ]
 
+  /// What says the strip has to move. Subscribed on the dialog and, for a sheet, on the window
+  /// it hangs from as well: a sheet never reports a move of its own (0 of 3,600 in spike 3b)
+  /// because it moves only when its parent does, but it does report its own resize, which is
+  /// what a Save panel's expand triangle does.
+  static let geometryNotifications: Set<AXNotification> = [.moved, .resized]
+
   /// How far up from a new sheet the dialog it belongs to is looked for. A Replace sheet's
   /// parent is the dialog itself; the spare levels are for a host that wraps it in one more
   /// group. Every level is a blocking read of a host that has just put up a sheet, so the walk
@@ -210,6 +219,10 @@ public actor DialogCoordinator {
     var isDirty = false
     var rereadsLeft = 0
     var subscriptions: Set<Subscription> = []
+    /// The window a sheet hangs from, whose moves are the sheet's own. Nil for a window or a
+    /// panel, and for a sheet whose host did not answer: the strip then follows the sheet's
+    /// resizes alone, which is the stock dialog plus less, never plus wrong.
+    var geometryHost: AXElement?
     /// `found` has been said, so whatever comes of the dialog is said with its id.
     var announced = false
 
@@ -473,6 +486,15 @@ public actor DialogCoordinator {
     ]
     entries[window]?.rereadsLeft = timing.rereads
     entries[window]?.work = nil
+    // Before the first reading: the strip attached at `found` and a dialog dragged in the
+    // moment after that has to be followed too. One attribute read for a sheet, none for a
+    // window.
+    if variant.isSheet {
+      let host = await services.parent(window)
+      guard isCurrent(id, at: window) else { return }
+      entries[window]?.geometryHost = host
+    }
+    await subscribe(to: nil, of: window, id: id)
     await read(window, id: id)
   }
 
@@ -560,6 +582,16 @@ public actor DialogCoordinator {
     if event.notification == .elementDestroyed {
       if let entry = entries[event.element], entry.dialog != nil {
         close(event.element, entry, observed: true)
+      }
+      return
+    }
+    if Self.geometryNotifications.contains(event.notification) {
+      // Only the dialog's own frame and the one it hangs from. An app moving some other window
+      // of its own is nothing to the strip, and a reading is never due for either.
+      for (window, entry) in entries
+      where entry.app.pid == event.pid && entry.dialog != nil
+        && (window == event.element || entry.geometryHost == event.element) {
+        output.yield(.moved(entry.id))
       }
       return
     }
@@ -669,19 +701,30 @@ public actor DialogCoordinator {
 
   /// The elements whose notifications say that a reading is due. The browser is another
   /// element after a change of view, so this follows every reading.
+  ///
+  /// Nil anchors is the set the dialog starts with, before its first reading: what says it
+  /// closed and what says it moved. Both are wanted from the moment the strip attaches.
   private func subscribe(
-    to anchors: DialogAnchors, of window: AXElement, id: DialogSession.ID
+    to anchors: DialogAnchors?, of window: AXElement, id: DialogSession.ID
   ) async {
     var wanted: Set<Subscription> = [
-      Subscription(notification: .elementDestroyed, element: window),
-      Subscription(notification: .valueChanged, element: anchors.pathPopup),
+      Subscription(notification: .elementDestroyed, element: window)
     ]
-    if let field = anchors.nameField {
-      wanted.insert(Subscription(notification: .valueChanged, element: field))
+    for notification in Self.geometryNotifications {
+      wanted.insert(Subscription(notification: notification, element: window))
+      if let host = entries[window]?.geometryHost {
+        wanted.insert(Subscription(notification: notification, element: host))
+      }
     }
-    if let browser = anchors.browser {
-      wanted.insert(Subscription(notification: .selectedChildrenChanged, element: browser))
-      wanted.insert(Subscription(notification: .selectedRowsChanged, element: browser))
+    if let anchors {
+      wanted.insert(Subscription(notification: .valueChanged, element: anchors.pathPopup))
+      if let field = anchors.nameField {
+        wanted.insert(Subscription(notification: .valueChanged, element: field))
+      }
+      if let browser = anchors.browser {
+        wanted.insert(Subscription(notification: .selectedChildrenChanged, element: browser))
+        wanted.insert(Subscription(notification: .selectedRowsChanged, element: browser))
+      }
     }
     guard let have = entries[window]?.subscriptions, have != wanted else { return }
     // Written first: a reading that ends while these calls run must not make them again.

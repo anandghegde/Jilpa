@@ -384,9 +384,18 @@ struct CoordinatorRecognitionTests {
     #expect(dialog.id == id && dialog.session.phase == .ready)
     #expect(dialog.session.originalFolder == .known(documents, source: .columnSelection))
     #expect(dialog.session.automationBar == nil && dialog.policy.allows(.learn))
+    // The close subscription comes before anything else is asked of the host, so a dialog that
+    // goes away during the first reading is not missed. The strip's own subscriptions follow it,
+    // and the reading is last: a dialog dragged in the moment after the strip attached is
+    // followed too.
     #expect(
-      Array(bench.script.log.prefix(4)) == [
-        "stage-one", "structure", "subscribe AXUIElementDestroyed e0", "read",
+      Array(bench.script.log.prefix(3)) == [
+        "stage-one", "structure", "subscribe AXUIElementDestroyed e0",
+      ])
+    let read = try #require(bench.script.log.firstIndex(of: "read"))
+    #expect(
+      Set(bench.script.log[..<read].filter { $0.hasPrefix("subscribe") }) == [
+        "subscribe AXUIElementDestroyed e0", "subscribe AXMoved e0", "subscribe AXResized e0",
       ])
   }
 
@@ -399,9 +408,9 @@ struct CoordinatorRecognitionTests {
     let subscribed = Set(bench.script.log.filter { $0.hasPrefix("subscribe") })
     #expect(
       subscribed == [
-        "subscribe AXUIElementDestroyed e0", "subscribe AXValueChanged e3",
-        "subscribe AXValueChanged e4", "subscribe AXSelectedChildrenChanged e5",
-        "subscribe AXSelectedRowsChanged e5",
+        "subscribe AXUIElementDestroyed e0", "subscribe AXMoved e0", "subscribe AXResized e0",
+        "subscribe AXValueChanged e3", "subscribe AXValueChanged e4",
+        "subscribe AXSelectedChildrenChanged e5", "subscribe AXSelectedRowsChanged e5",
       ])
   }
 
@@ -499,6 +508,71 @@ struct CoordinatorRecognitionTests {
     else { throw Bench.Unexpected() }
     #expect(next.serial == id.serial + 1 && bench.script.count("read") == 0)
   }
+}
+
+@Suite("Dialog coordinator: the strip follows the dialog", .timeLimit(.minutes(1)))
+struct CoordinatorGeometryTests {
+  @Test func aFrameChangeSaysWhereTheStripGoesAndNothingElse() async throws {
+    var bench = Bench()
+    let dialog = try await bench.open()
+    let reads = bench.script.count("read")
+
+    await bench.coordinator.handle(announced(.moved, by: window))
+    guard case .moved(let id) = try await bench.next() else { throw Bench.Unexpected() }
+    #expect(id == dialog.id)
+
+    // A resize is the same answer: the Save panel's expand triangle changes the frame without
+    // changing a word of the reading.
+    await bench.coordinator.handle(announced(.resized, by: window))
+    guard case .moved(id) = try await bench.next() else { throw Bench.Unexpected() }
+    // Nothing was read and no settle was waited out: a move says only that the strip moves.
+    #expect(bench.script.count("read") == reads && bench.clock.sleeping == 0)
+  }
+
+  @Test func aSheetFollowsTheWindowItHangsFrom() async throws {
+    var bench = Bench()
+    bench.script.set { $0.parents = [window: element(6)] }
+    let dialog = try await bench.open()
+    let subscribed = Set(bench.script.log.filter { $0.hasPrefix("subscribe") })
+    #expect(subscribed.isSuperset(of: ["subscribe AXMoved e6", "subscribe AXResized e6"]))
+
+    // A sheet reports no move of its own; the one it hangs from does, and that is the sheet's.
+    await bench.coordinator.handle(announced(.moved, by: element(6)))
+    guard case .moved(let id) = try await bench.next() else { throw Bench.Unexpected() }
+    #expect(id == dialog.id)
+  }
+
+  @Test func aWindowDialogIsNotAskedWhatItHangsFrom() async throws {
+    var bench = Bench()
+    bench.script.set { $0.stageOne = .panel(.saveWindow, cell) }
+    _ = try await bench.open()
+    #expect(bench.script.count("parent e0") == 0)
+    let subscribed = Set(bench.script.log.filter { $0.hasPrefix("subscribe") })
+    #expect(subscribed.isSuperset(of: ["subscribe AXMoved e0", "subscribe AXResized e0"]))
+  }
+
+  @Test func aSheetWhoseHostDoesNotAnswerStillFollowsItsOwnResize() async throws {
+    var bench = Bench()
+    // No parent in the tree: the strip follows the sheet's own frame alone, which is the stock
+    // dialog plus less, never plus wrong.
+    let dialog = try await bench.open()
+    #expect(bench.script.count("parent e0") == 1)
+    await bench.coordinator.handle(announced(.resized, by: window))
+    guard case .moved(let id) = try await bench.next() else { throw Bench.Unexpected() }
+    #expect(id == dialog.id)
+  }
+
+  @Test func someOtherWindowOfTheSameAppMovesNothing() async throws {
+    var bench = Bench()
+    let dialog = try await bench.open()
+    // The host moving a document window of its own is nothing to the strip. The move that
+    // follows is the one the stream carries, which is what says the first raised no event.
+    await bench.coordinator.handle(announced(.moved, by: element(7)))
+    await bench.coordinator.handle(announced(.moved, by: window))
+    guard case .moved(let id) = try await bench.next() else { throw Bench.Unexpected() }
+    #expect(id == dialog.id)
+  }
+
 }
 
 @Suite("Dialog coordinator: keeping the reading current", .timeLimit(.minutes(1)))

@@ -19,11 +19,15 @@ import JilpaUI
 /// and feeds it both from verified arrivals and from folder changes the reader observed, so Back
 /// follows the user's own navigations as well as Jilpa's.
 ///
-/// What WP5 adds: the zones and their content, the buttons and hotkeys for Back, Forward and
-/// Return to original folder, docking preferences, live move and resize tracking, hiding when
-/// the host is not frontmost or the dialog is on another Space, and the recovery notice. What
-/// WP6 adds: the destinations themselves. Here there is one, and it is the same one for every
-/// dialog.
+/// It keeps the strip on its dialog (WP5): the coordinator says when the dialog's frame or its
+/// parent's changed, a display link turns that stream into one placement per refresh, and one
+/// rule — `PanelVisibility` — decides whether the strip is on screen at all. The strip sits one
+/// level above a modal file panel, so it may only ever show over its own host: it goes away
+/// when that app is not frontmost and comes back with it.
+///
+/// What WP5 still adds: the zones and their content, the buttons and hotkeys for Back, Forward
+/// and Return to original folder, and the recovery notice. What WP6 adds: the destinations
+/// themselves. Here there is one, and it is the same one for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -32,6 +36,18 @@ public final class PanelPresenter: PanelActions {
   private let pool: AXSessionPool
   private let host: PanelHost
   private let places: LocationEdge
+  private let clock: PollClock
+  /// The side of the dialog the strip prefers. `PanelDocking` falls back from it in a fixed
+  /// order when it would leave the screen.
+  private let preferred: DockSide
+  /// Which app is in front. Never `NSApp.isActive` and never the system-wide
+  /// `AXFocusedApplication`: while fuzzy jump holds key status both name Jilpa although no
+  /// activation was delivered and the host is still frontmost (spike 3b).
+  private let frontmost: @MainActor () -> pid_t?
+  /// Merges the host's moved and resized notifications into one placement per display refresh,
+  /// and says when the drag is over.
+  private var tracker: PanelTracker
+  private let tracking: PanelTracking
   /// Nil when nothing records: the panel then works exactly as it does with one, and no row is
   /// written. Recording never decides anything, so its absence changes no behaviour.
   private let recorder: NavigationRecorder?
@@ -40,6 +56,9 @@ public final class PanelPresenter: PanelActions {
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
   private var pump: Task<Void, Never>?
+  /// A frame read is in flight, and whether anything asked for another while it ran.
+  private var placing = false
+  private var placeAgain = false
 
   /// One trail per dialog the coordinator has announced, not only the one under the strip: a
   /// dialog that loses the strip to a frontmost app and gets it back keeps where it has been.
@@ -56,18 +75,32 @@ public final class PanelPresenter: PanelActions {
 
   private struct Shown {
     var id: DialogSession.ID
+    var app: AppProcess
     var window: AXElement
     var descriptor: DialogDescriptor?
     var variant: DialogVariant
     /// What the button last said about itself, so the strip can be redrawn without asking the
     /// coordinator again.
     var isEnabled = false
+    /// The line under the button, kept for the same reason.
+    var notice: String?
+    /// Where the strip goes. Nil when no side of the dialog had room, which is not the same as
+    /// not having looked yet: the look happens before the strip is first drawn.
+    var placement: PanelPlacement?
   }
+
+  /// What the workspace tells the strip: the frontmost app changed, or the Space did. Both can
+  /// take the dialog out from under the strip without the host saying anything at all.
+  private var watching: [any NSObjectProtocol] = []
 
   public init(
     coordinator: DialogCoordinator, navigator: any Navigating, latch: ActivityLatchMirror,
     pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live,
-    recorder: NavigationRecorder? = nil
+    recorder: NavigationRecorder? = nil, tracking: PanelTracking = .live,
+    preferred: DockSide = .below, clock: PollClock = .continuous,
+    frontmost: @escaping @MainActor () -> pid_t? = {
+      NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
   ) {
     self.coordinator = coordinator
     self.navigator = navigator
@@ -77,7 +110,13 @@ public final class PanelPresenter: PanelActions {
     self.places = places
     self.recorder = recorder
     self.destination = destination
+    self.tracking = tracking
+    self.preferred = preferred
+    self.clock = clock
+    self.frontmost = frontmost
+    tracker = PanelTracker(style: tracking)
     host.actions = self
+    host.onFrame = { [weak self] in self?.displayRefresh() }
   }
 
   public func start() {
@@ -89,13 +128,28 @@ public final class PanelPresenter: PanelActions {
         await self.handle(event)
       }
     }
+    let center = NSWorkspace.shared.notificationCenter
+    for name in [
+      NSWorkspace.didActivateApplicationNotification,
+      NSWorkspace.didDeactivateApplicationNotification,
+      NSWorkspace.activeSpaceDidChangeNotification,
+    ] {
+      watching.append(
+        center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+          Task { @MainActor in self?.refresh() }
+        })
+    }
   }
 
   public func stop() {
     pump?.cancel()
     pump = nil
+    let center = NSWorkspace.shared.notificationCenter
+    for observer in watching { center.removeObserver(observer) }
+    watching.removeAll()
     host.hide()
     shown = nil
+    tracker = PanelTracker(style: tracking)
     trails.removeAll()
     if let recorder { Task { await recorder.forgetAll() } }
   }
@@ -106,13 +160,13 @@ public final class PanelPresenter: PanelActions {
   /// coordinator's stream, which the soak does because it watches the same events itself.
   public func handle(_ event: CoordinatorEvent) async {
     switch event {
-    case .found(let id, _, let window, let variant):
+    case .found(let id, let app, let window, let variant):
       // The anchors are still being found, so the strip attaches and its button waits: showing
       // it now is how the attach budget is met, and a dialog that turns out to be unnavigable
       // takes it away again.
-      shown = Shown(id: id, window: window, descriptor: nil, variant: variant)
-      await place(window, variant: variant)
-      host.update(contents(enabled: false, notice: nil))
+      shown = Shown(id: id, app: app, window: window, descriptor: nil, variant: variant)
+      tracker = PanelTracker(style: tracking)
+      await reposition()
 
     case .updated(let dialog):
       latch.observe(dialog)
@@ -122,10 +176,17 @@ public final class PanelPresenter: PanelActions {
       guard shown?.id == dialog.id else { return }
       shown?.descriptor = dialog.session.descriptor
       shown?.isEnabled = dialog.session.allowsManualNavigation
-      host.update(
-        contents(
-          enabled: dialog.session.allowsManualNavigation,
-          notice: notice(for: dialog.session)))
+      shown?.notice = notice(for: dialog.session)
+      apply()
+
+    case .moved(let id):
+      // The dialog's frame changed, or the window a sheet hangs from moved. Nothing is read
+      // here: the refresh the display link brings does that, once, however many notifications
+      // the host sent in between.
+      guard shown?.id == id else { return }
+      tracker.moved(at: clock.now())
+      if tracker.hidesForMove { apply() }
+      host.startTracking()
 
     case .ignored(let id, _, _, _):
       if let id, shown?.id == id { dismiss(id) }
@@ -147,6 +208,7 @@ public final class PanelPresenter: PanelActions {
   private func dismiss(_ id: DialogSession.ID) {
     host.hide()
     shown = nil
+    tracker = PanelTracker(style: tracking)
   }
 
   // MARK: - The button
@@ -236,8 +298,9 @@ public final class PanelPresenter: PanelActions {
   /// goes with the old destination, because it was about a move to somewhere else.
   public func setDestination(_ url: URL) {
     destination = url
-    guard let shown else { return }
-    host.update(contents(enabled: shown.isEnabled, notice: nil))
+    guard shown != nil else { return }
+    shown?.notice = nil
+    apply()
   }
 
   private func move(
@@ -297,7 +360,8 @@ public final class PanelPresenter: PanelActions {
 
     guard shown?.id == target.id else { return }
     shown?.isEnabled = true
-    host.update(contents(enabled: true, notice: self.notice(for: result)))
+    shown?.notice = notice(for: result)
+    apply()
   }
 
   /// One `nav_attempt` row for a move the Navigator answered. An app nobody can name records
@@ -345,19 +409,90 @@ public final class PanelPresenter: PanelActions {
       : String(localized: "Stopped partway: \(reason).")
   }
 
-  private func place(_ window: AXElement, variant: DialogVariant) async {
-    guard let geometry = await geometry(of: window, variant: variant),
-      let placement = PanelDocking.place(
-        dialog: geometry, screens: screens(), preferred: .below,
-        thickness: PanelHost.thickness, gap: PanelHost.gap,
-        minimumLength: PanelHost.minimumLength)
-    else {
-      // No side has room, or the dialog is on no screen. There is no strip; the menu bar and
-      // the hotkeys remain, and the health view says why.
-      host.hide()
+  // MARK: - Following the dialog
+
+  /// One display refresh, while a dialog is moving.
+  private func displayRefresh() {
+    switch tracker.tick(at: clock.now()) {
+    case .nothing:
+      break
+    case .place:
+      refresh()
+    case .settle:
+      // The link stops first: the placement that follows is the one the strip keeps until the
+      // dialog moves again, and there is nothing left to follow it with.
+      host.stopTracking()
+      refresh()
+    }
+  }
+
+  /// Reads where the dialog is now and draws the strip accordingly.
+  ///
+  /// One read at a time. The read is a blocking call into the host and a drag can ask for
+  /// another before it comes back; a second in flight would race the first to `placement` and
+  /// could leave the strip at the older frame. What arrives while one runs is remembered as one
+  /// more read, not as a queue of them.
+  private func refresh() {
+    guard !placing else {
+      placeAgain = true
       return
     }
-    host.show(contents(enabled: false, notice: nil), at: placement)
+    placing = true
+    Task { @MainActor in
+      await self.reposition()
+      self.placing = false
+      guard self.placeAgain else { return }
+      self.placeAgain = false
+      self.refresh()
+    }
+  }
+
+  private func reposition() async {
+    guard let target = shown else { return apply() }
+    // The visibility rule decides before the frame is read, not after: a host that is not
+    // frontmost draws no strip whatever its frame says, and the read is a blocking call into
+    // an app the user has left.
+    guard frontmost() == target.app.pid else { return apply() }
+    let placement = await placement(of: target)
+    // A dialog that closed or was replaced while the read ran is not this one.
+    guard shown?.id == target.id else { return }
+    shown?.placement = placement
+    apply()
+  }
+
+  /// The one rule for whether the strip is on screen, asked again after every move, every
+  /// activation and every Space change.
+  private func apply() {
+    let visibility = PanelVisibility.decide(
+      hasDialog: shown != nil,
+      hostIsFrontmost: shown.map { frontmost() == $0.app.pid } ?? false,
+      hidesForMove: tracker.hidesForMove,
+      placement: shown?.placement)
+    switch visibility {
+    case .shown(let placement):
+      guard let shown else { return }
+      host.show(
+        contents(enabled: shown.isEnabled, notice: shown.notice), at: placement,
+        fading: tracking == .fadeOnMove)
+    case .away(.noDialog):
+      host.hide()
+    case .away(.moving):
+      host.withdraw(fading: true)
+    // No side had room, or the dialog's app is not in front. Either way there is no strip; the
+    // menu bar and the hotkeys remain, and the health view says why.
+    case .away(.noRoom), .away(.hostNotFrontmost):
+      host.withdraw(fading: false)
+    }
+  }
+
+  private func placement(of target: Shown) async -> PanelPlacement? {
+    guard let geometry = await geometry(of: target.window, variant: target.variant) else {
+      return nil
+    }
+    return PanelDocking.place(
+      dialog: geometry, screens: screens(), preferred: preferred,
+      thickness: PanelHost.thickness, gap: PanelHost.gap,
+      minimumLength: PanelHost.minimumLength)
   }
 
   private func screens() -> [ScreenGeometry] {
@@ -368,9 +503,7 @@ public final class PanelPresenter: PanelActions {
   /// gives them: global, origin at the primary display's upper left. `PanelDocking` flips them.
   private func geometry(of window: AXElement, variant: DialogVariant) async -> DialogGeometry? {
     guard let frame = await frame(of: window) else { return nil }
-    guard variant == .openSheet || variant == .saveSheet else {
-      return DialogGeometry(frame: frame)
-    }
+    guard variant.isSheet else { return DialogGeometry(frame: frame) }
     guard let pid = window.pid else { return DialogGeometry(frame: frame) }
     let parent = try? await pool.session(for: pid).value(.parent, of: window).elementValue
     guard let parent, let parentFrame = await self.frame(of: parent) else {

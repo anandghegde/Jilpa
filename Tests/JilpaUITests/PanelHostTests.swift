@@ -93,6 +93,98 @@ struct PanelHostTests {
     host.update(PanelContents(destination: "Invoices", isEnabled: true))
     host.button.performClick(nil)
   }
+
+  // MARK: - Following the dialog
+
+  /// The move-and-resize path runs once per display refresh for as long as a drag lasts, so it
+  /// does the frame and the side and nothing else.
+  @Test func movingTakesTheFrameAndTheSideAndLeavesTheContents() {
+    let host = PanelHost()
+    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    #expect(host.stack.orientation == .horizontal)
+
+    let side = CGRect(x: 600, y: 200, width: PanelHost.thickness, height: 400)
+    host.move(to: PanelPlacement(frame: side, side: .right, screen: 0, isInsideParent: false))
+    #expect(host.window.frame == side)
+    #expect(host.stack.orientation == .vertical)
+    // The contents were never touched.
+    #expect(host.button.title == "Invoices" && host.isVisible)
+  }
+
+  /// The dialog is still there: its app is not in front, or it is being dragged under the
+  /// fallback. The strip comes back saying what it said, without the coordinator being asked
+  /// again.
+  @Test func withdrawingKeepsWhatTheStripSaid() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(destination: "Invoices", isEnabled: true, notice: "Read-only folder."),
+      at: placement(.below))
+    host.withdraw(fading: false)
+    #expect(!host.isVisible)
+    #expect(host.button.title == "Invoices" && host.notice.stringValue == "Read-only folder.")
+
+    host.move(to: placement(.below))
+    #expect(host.isVisible && host.window.alphaValue == 1)
+  }
+
+  /// A strip that is already off screen has nothing to fade, and a fade left half done would
+  /// leave it there at some alpha of its own.
+  @Test func withdrawingAStripThatIsAlreadyGoneDoesNothing() {
+    let host = PanelHost()
+    host.withdraw(fading: true)
+    #expect(!host.isVisible && host.window.alphaValue == 1)
+  }
+
+  /// A fade that finishes after the strip has been shown again must not take it away, so a
+  /// strip brought back is at full alpha and on screen the moment it is moved.
+  @Test func aStripShownAgainDuringAFadeIsWhole() {
+    let host = PanelHost()
+    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.withdraw(fading: true)
+    host.move(to: placement(.below), fading: true)
+    #expect(host.isVisible && host.window.alphaValue == 1)
+  }
+
+  /// The dialog is gone. The next one must not inherit a line about this one, so the strip
+  /// forgets rather than deduplicating against it.
+  @Test func hidingForgetsWhatTheStripSaid() {
+    let host = PanelHost()
+    let contents = PanelContents(destination: "Invoices", isEnabled: true, notice: "Saved.")
+    host.show(contents, at: placement(.below))
+    host.hide()
+
+    host.notice.stringValue = "stale"
+    host.update(contents)
+    #expect(host.notice.stringValue == "Saved.")
+  }
+
+  /// A link left running would wake the process 120 times a second for a dialog nobody is
+  /// touching, so it runs only while there is something to follow and a closed dialog stops it.
+  @Test func theStripAsksForRefreshesOnlyWhileItFollows() {
+    let host = PanelHost()
+    var ticks = 0
+    host.onFrame = { ticks += 1 }
+    #expect(!host.isTracking)
+
+    host.startTracking()
+    #expect(host.isTracking)
+    host.startTracking()
+    #expect(host.isTracking)
+
+    host.stopTracking()
+    #expect(!host.isTracking)
+
+    host.startTracking()
+    host.hide()
+    #expect(!host.isTracking)
+    #expect(ticks == 0)
+  }
+
+  private func placement(_ side: DockSide) -> PanelPlacement {
+    PanelPlacement(
+      frame: CGRect(x: 120, y: 80, width: 400, height: PanelHost.thickness), side: side,
+      screen: 0, isInsideParent: false)
+  }
 }
 
 @MainActor

@@ -24,6 +24,10 @@ public enum DialogVariant: String, Sendable, Hashable, CaseIterable {
     case .saveWindow, .saveSheet: .save
     }
   }
+
+  /// A sheet hangs from another window, which is where its position comes from and which is
+  /// blocked while it is up.
+  public var isSheet: Bool { self == .openSheet || self == .saveSheet }
 }
 
 /// The signature predicates this build has compiled in. A bundle names one; it cannot describe

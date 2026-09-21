@@ -486,6 +486,8 @@ enum Coordinate {
         case .ignored(_, _, _, let reason): board.noteIgnored(reason)
         case .gone: board.noteGone()
         case .updated(let dialog): board.noteUpdated(dialog)
+        // Where the strip goes, not what the dialog says. The board records readings.
+        case .moved: break
         case .closed: board.noteClosed()
         case .ended(let dialog):
           if case .ended(let outcome) = dialog.session.phase { board.noteEnded(outcome) }

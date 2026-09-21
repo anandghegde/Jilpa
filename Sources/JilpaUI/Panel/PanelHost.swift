@@ -43,15 +43,31 @@ public final class PanelHost {
 
   public weak var actions: (any PanelActions)?
 
+  /// One call per display refresh while the strip is following a dialog. The panel presenter
+  /// decides what a refresh means; the host only owns the link.
+  public var onFrame: (() -> Void)? {
+    get { ticker.onTick }
+    set { ticker.onTick = newValue }
+  }
+
+  /// How long the fade-on-move fallback takes each way. Short enough that a nudge of a drag
+  /// does not leave the strip half drawn, long enough not to read as a flicker.
+  public static let fadeDuration: TimeInterval = 0.12
+
   // Internal rather than private: the strip's own tests read them, and none of it is API.
   let window: StripPanel
   let button: StripButton
   let notice: NSTextField
-  private let stack: NSStackView
+  let ticker: FrameTicker
+  let stack: NSStackView
   private var contents: PanelContents?
+  /// Which fade is the current one. A fade that finishes after the strip has been shown again
+  /// must not take it away.
+  private var fade = 0
 
   public init() {
     window = StripPanel()
+    ticker = FrameTicker(window: window)
     button = StripButton()
     button.bezelStyle = .rounded
     button.setButtonType(.momentaryPushIn)
@@ -87,14 +103,70 @@ public final class PanelHost {
 
   public var isVisible: Bool { window.isVisible }
 
+  /// Whether the strip is asking for display refreshes.
+  public var isTracking: Bool { ticker.isRunning }
+
   /// Puts the strip where the placement says and orders it in front. Never key: taking key
   /// status from the dialog is fuzzy jump's alone, and it is the only focus change Jilpa makes.
-  public func show(_ contents: PanelContents, at placement: PanelPlacement) {
+  public func show(
+    _ contents: PanelContents, at placement: PanelPlacement, fading: Bool = false
+  ) {
     update(contents)
+    move(to: placement, fading: fading)
+  }
+
+  /// The strip's new frame, with the contents left as they are. This is the move-and-resize
+  /// path: it runs once per display refresh for as long as a drag lasts, so it does no work
+  /// beyond the frame and the orientation the side asks for.
+  ///
+  /// `fading` is the other half of the fade-on-move fallback and animates only a strip that is
+  /// off screen coming back. A strip already on screen is moved, never faded: under live
+  /// tracking this runs every refresh, and an animation there would fight the frame it is given.
+  public func move(to placement: PanelPlacement, fading: Bool = false) {
+    fade += 1
     stack.orientation = placement.side.isHorizontal ? .horizontal : .vertical
     window.setFrame(placement.frame, display: false)
+    let returning =
+      fading && !window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    window.alphaValue = returning ? 0 : 1
     window.orderFront(nil)
+    guard returning else { return }
+    NSAnimationContext.runAnimationGroup { context in
+      context.duration = Self.fadeDuration
+      window.animator().alphaValue = 1
+    }
   }
+
+  /// Takes the strip off screen with its contents kept, for a dialog that is still there: its
+  /// app is not frontmost, or it is being dragged and `fadeOnMove` is on. `fading` animates it,
+  /// which Reduce Motion turns back into the plain thing.
+  public func withdraw(fading: Bool) {
+    guard window.isVisible else { return }
+    fade += 1
+    guard fading, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+      window.orderOut(nil)
+      window.alphaValue = 1
+      return
+    }
+    let generation = fade
+    NSAnimationContext.runAnimationGroup { context in
+      context.duration = Self.fadeDuration
+      window.animator().alphaValue = 0
+    } completionHandler: { [weak self] in
+      // The completion runs on the main thread, where it was scheduled; the annotation is what
+      // Swift 6 needs to believe it.
+      MainActor.assumeIsolated {
+        // A strip shown again while this fade ran keeps its own turn, not this one's ending.
+        guard let self, self.fade == generation else { return }
+        self.window.orderOut(nil)
+        self.window.alphaValue = 1
+      }
+    }
+  }
+
+  /// Starts and stops the display refreshes that `onFrame` answers.
+  public func startTracking() { ticker.start() }
+  public func stopTracking() { ticker.stop() }
 
   public func update(_ next: PanelContents) {
     guard next != contents else { return }
@@ -117,8 +189,13 @@ public final class PanelHost {
     }
   }
 
+  /// The dialog is gone. The strip stops following, goes away and forgets what it said, so the
+  /// next dialog cannot inherit a line about this one.
   public func hide() {
+    fade += 1
+    ticker.stop()
     window.orderOut(nil)
+    window.alphaValue = 1
     contents = nil
   }
 
