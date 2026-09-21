@@ -6,21 +6,31 @@
 import AppKit
 import JilpaCore
 
-/// Menu bar presence (S1). It carries the version, Quit and the favorites (D4); recents, open
-/// Finder windows, pause and private mode land with the rest of WP6.
+/// Menu bar presence (S1). It carries the version, Quit, the favorites (D4) and the recents
+/// (D5); open Finder windows, pause and private mode land with the rest of WP6.
 ///
-/// The controller holds no policy. It is told what the favorites are and reports which one was
-/// chosen; whether that means navigating the dialog in front or opening a Finder window is the
-/// app's decision, because only the app knows whether there is a dialog to navigate.
+/// The controller holds no policy. It is told what the favorites and the recents are and
+/// reports which one was chosen; whether that means navigating the dialog in front or opening a
+/// Finder window is the app's decision, because only the app knows whether there is a dialog to
+/// navigate. It does not decide whether a recent may be shown either: what it is given has
+/// already been past the privacy gate, and a list it was given nothing for is simply a menu
+/// without that section.
 @MainActor
 public final class StatusItemController: NSObject, NSMenuDelegate {
   /// A favorite chosen from the menu bar.
   public var onChooseFavorite: ((FavoritePlace) -> Void)?
+  /// A recent folder chosen from the menu bar, named by its path.
+  public var onChooseRecent: ((RecentPlace) -> Void)?
+  /// The menu is about to be drawn. The app answers by handing over the recents it would offer
+  /// now — freshly gated, because private mode may have moved since the menu was last built and
+  /// a list held from then would be one the gate has already withdrawn.
+  public var onMenuOpen: (() -> Void)?
 
   private let item: NSStatusItem
   private let menu = NSMenu()
   private let version: String
   private var favorites: [FavoritePlace] = []
+  private var recents: [RecentPlace] = []
 
   public init(version: String) {
     self.version = version
@@ -44,9 +54,24 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     rebuild()
   }
 
+  /// The recents as the counters have them now (D5), already past the gate.
+  ///
+  /// Given rather than read, like the favorites: the controller is in `JilpaUI`, which has no
+  /// store and no gate, and a menu that could read either would be a second place a privacy
+  /// decision gets made.
+  public func setRecents(_ list: [RecentPlace]) {
+    guard list != recents else { return }
+    recents = list
+    rebuild()
+  }
+
   /// A menu about to open is rebuilt anyway, so a change that arrived while the menu bar was
-  /// being clicked cannot be a click on a stale row.
-  public func menuNeedsUpdate(_ menu: NSMenu) { rebuild() }
+  /// being clicked cannot be a click on a stale row. The app is asked first: the recents it
+  /// hands back are then the ones this opening shows.
+  public func menuNeedsUpdate(_ menu: NSMenu) {
+    onMenuOpen?()
+    rebuild()
+  }
 
   private func rebuild() {
     menu.removeAllItems()
@@ -77,6 +102,27 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       }
     }
 
+    if !recents.isEmpty {
+      menu.addItem(.separator())
+      let heading = NSMenuItem(
+        title: String(localized: "Recents"), action: nil, keyEquivalent: "")
+      heading.isEnabled = false
+      menu.addItem(heading)
+      for place in recents {
+        let row = NSMenuItem(
+          title: place.name, action: #selector(recentPressed(_:)), keyEquivalent: "")
+        row.target = self
+        row.indentationLevel = 1
+        // The path, because that is what a navigation takes and what identifies the row here.
+        // Two recents can share a name; nothing in this menu compares them by one.
+        row.representedObject = place.path
+        row.image = NSImage(
+          systemSymbolName: place.pinned ? "pin.fill" : "clock", accessibilityDescription: nil)
+        row.subtitle = place.detail
+        menu.addItem(row)
+      }
+    }
+
     menu.addItem(.separator())
     menu.addItem(
       NSMenuItem(
@@ -92,5 +138,12 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       let place = favorites.first(where: { $0.id.rawValue == raw })
     else { return }
     onChooseFavorite?(place)
+  }
+
+  @objc private func recentPressed(_ sender: NSMenuItem) {
+    guard let path = sender.representedObject as? String,
+      let place = recents.first(where: { $0.path == path })
+    else { return }
+    onChooseRecent?(place)
   }
 }

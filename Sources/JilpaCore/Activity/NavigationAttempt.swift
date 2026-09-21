@@ -5,6 +5,10 @@ import Foundation
 public enum ManualSource: String, Sendable, Hashable, CaseIterable, LogSafe {
   case panelButton = "panel-button"
   case favorite
+  /// A folder chosen from the recents, on the strip or in the menu bar (D5). It is told apart
+  /// from a favorite because one is a place the user named and the other is one Jilpa worked
+  /// out from what they confirmed, and the correction rate of the two is not the same question.
+  case recent
   case quickSearch = "quick-search"
   case hotkey
   case pathEntry = "path-entry"

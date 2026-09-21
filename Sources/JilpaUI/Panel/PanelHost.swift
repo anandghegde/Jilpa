@@ -50,11 +50,17 @@ public struct PanelContents: Sendable, Equatable {
   /// the file identifier — never by comparing two paths as strings. The strip is told the
   /// answer, so a menu item cannot be the place a folder equality rule is quietly reinvented.
   public var favoriteHere: FavoriteID?
+  /// The recent folders this dialog may be offered, in frecency order (D5).
+  ///
+  /// Already past the privacy gate when the strip is given them: an excluded app, private mode
+  /// and a non-recording dialog leave this empty, and the strip draws what it is handed rather
+  /// than asking a question of its own.
+  public var recents: [RecentPlace]
 
   public init(
     destination: String, isEnabled: Bool, notice: Notice? = nil,
     history: HistoryState = HistoryState(), favorites: [FavoritePlace] = [],
-    folder: String? = nil, favoriteHere: FavoriteID? = nil
+    folder: String? = nil, favoriteHere: FavoriteID? = nil, recents: [RecentPlace] = []
   ) {
     self.destination = destination
     self.isEnabled = isEnabled
@@ -63,6 +69,7 @@ public struct PanelContents: Sendable, Equatable {
     self.favorites = favorites
     self.folder = folder
     self.favoriteHere = favoriteHere
+    self.recents = recents
   }
 }
 
@@ -86,6 +93,10 @@ public protocol PanelActions: AnyObject {
   func panelChoseAddFavorite()
   /// The same item once the folder is already a favorite. It takes the entry back out.
   func panelChoseRemoveFavorite(_ id: FavoriteID)
+  /// A recent folder chosen from the strip's recents menu (D5). It is named by its path, which
+  /// is what a navigation takes; a folder that has since moved is refused with a reason rather
+  /// than replaced (contract 5).
+  func panelChoseRecent(_ path: String)
 }
 
 /// The strip's one window and its contents (D2).
@@ -161,12 +172,15 @@ public final class PanelHost {
   let noticeZone: NSStackView
   let noticeSymbol: NSImageView
   let notice: NSTextField
-  /// Favorites, and later recents and open Finder windows (D4, D5, D7). One button that pops a
-  /// menu, because the strip has room for a word and the list has none.
+  /// Favorites, recents, and later open Finder windows (D4, D5, D7). One button per menu, as
+  /// the wireframe draws them, because each list is about something different and a single
+  /// menu of all of them would be the drill-in that is not due yet.
   let menusZone: NSStackView
   let favoritesButton: StripButton
-  /// What the menus zone shrinks to: the star alone, with the same menu behind it.
+  /// What each menu shrinks to: its symbol alone, with the same menu behind it.
   let favoritesIcon: StripButton
+  let recentsButton: StripButton
+  let recentsIcon: StripButton
   /// The fuzzy jump, in the same window as the zones and never up at the same time.
   let jump: JumpView
 
@@ -250,7 +264,17 @@ public final class PanelHost {
     favoritesButton.setContentCompressionResistancePriority(.required, for: .horizontal)
     favoritesButton.setContentHuggingPriority(.required, for: .horizontal)
     favoritesIcon = Self.iconButton(symbol: "star")
-    menusZone = NSStackView(views: [favoritesButton, favoritesIcon])
+    recentsButton = StripButton()
+    recentsButton.bezelStyle = .accessoryBar
+    recentsButton.setButtonType(.momentaryPushIn)
+    recentsButton.title = String(localized: "Recents")
+    recentsButton.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)
+    recentsButton.imagePosition = .imageLeading
+    recentsButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+    recentsButton.setContentHuggingPriority(.required, for: .horizontal)
+    recentsIcon = Self.iconButton(symbol: "clock")
+    menusZone = NSStackView(
+      views: [favoritesButton, favoritesIcon, recentsButton, recentsIcon])
     menusZone.spacing = Self.controlSpacing
 
     zones = NSStackView(views: [historyZone, suggestionZone, noticeZone, menusZone])
@@ -293,6 +317,12 @@ public final class PanelHost {
       control.action = #selector(favoritesPressed)
       control.setAccessibilityLabel(String(localized: "Favorites"))
       control.toolTip = String(localized: "Favorites")
+    }
+    for control in [recentsButton, recentsIcon] {
+      control.target = self
+      control.action = #selector(recentsPressed)
+      control.setAccessibilityLabel(String(localized: "Recent folders"))
+      control.toolTip = String(localized: "Recent folders")
     }
 
     // Reduce Transparency and Increase Contrast can both be turned on while a dialog is open.
@@ -519,17 +549,30 @@ public final class PanelHost {
         ZoneDemand(zone: .suggestions, lengths: [.icon: Self.controlLength]))
     }
 
-    // The menus zone is there when it has something to offer: a favorite to go to, or a folder
-    // this dialog is in that could become one. Neither, and it hands in no demand at all.
-    if let contents, !contents.favorites.isEmpty || contents.folder != nil {
-      if horizontal {
-        demands.append(
-          ZoneDemand(
-            zone: .menus, full: max(favoritesButton.fittingSize.width, Self.controlLength),
-            icon: Self.controlLength))
-      } else {
-        demands.append(ZoneDemand(zone: .menus, lengths: [.icon: Self.controlLength]))
+    // The menus zone is there when it has something to offer. With nothing to go to and
+    // nothing to add it hands in no demand at all and takes part in no layout.
+    let menus = menusOffer
+    if menus.any {
+      let width = { (control: StripButton) in
+        max(control.fittingSize.width, Self.controlLength)
       }
+      var full: CGFloat = 0
+      if menus.favorites { full += width(favoritesButton) }
+      if menus.recents { full += width(recentsButton) }
+      if menus.both { full += Self.controlSpacing }
+      // A vertical strip is `thickness` points across, which is room for a symbol and not for a
+      // word, so both menus offer only their icons there — stacked while there is length for
+      // two, and one of them when there is not.
+      demands.append(
+        horizontal
+          ? ZoneDemand(
+            zone: .menus, full: full, compact: menus.both ? Self.controlLength + step : nil,
+            icon: Self.controlLength)
+          : ZoneDemand(
+            zone: .menus,
+            lengths: menus.both
+              ? [.compact: Self.controlLength + step, .icon: Self.controlLength]
+              : [.icon: Self.controlLength]))
     }
 
     guard contents?.notice != nil else { return demands }
@@ -562,9 +605,34 @@ public final class PanelHost {
     self.notice.isHidden = notice <= .icon
 
     let menus = details[.menus] ?? .hidden
+    let offer = menusOffer
     menusZone.isHidden = menus == .hidden
-    favoritesButton.isHidden = menus != .full
-    favoritesIcon.isHidden = menus != .icon
+    favoritesButton.isHidden = !(offer.favorites && menus == .full)
+    favoritesIcon.isHidden = !(offer.favorites && (menus == .compact || menus == .icon))
+    recentsButton.isHidden = !(offer.recents && menus == .full)
+    // The recents are the control the zone gives up first: they are in the menu bar and in the
+    // fuzzy jump as well, and the favorites are the list the user named themselves. Only when
+    // there are no favorites at all does the smallest drawing of the zone belong to them.
+    recentsIcon.isHidden = !(offer.recents
+      && (menus == .compact || (menus == .icon && !offer.favorites)))
+  }
+
+  /// What the menus zone has to offer right now, which decides both what it asks for and what
+  /// it draws. One rule, so the width that was measured is the width that is used.
+  private struct MenusOffer {
+    var favorites = false
+    var recents = false
+    var any: Bool { favorites || recents }
+    var both: Bool { favorites && recents }
+  }
+
+  private var menusOffer: MenusOffer {
+    guard let contents else { return MenusOffer() }
+    // A folder with no favorite for it is still something to offer: the menu's last item adds
+    // it. The recents offer nothing when there are none, and then the clock is not drawn.
+    return MenusOffer(
+      favorites: !contents.favorites.isEmpty || contents.folder != nil,
+      recents: !contents.recents.isEmpty)
   }
 
   /// The strip is never key, so VoiceOver does not follow a change in it by itself. A notice
@@ -665,6 +733,46 @@ public final class PanelHost {
       menu.addItem(empty)
     }
     return menu
+  }
+
+  /// Pops the recents menu under whichever of the two clocks was pressed (D5).
+  ///
+  /// Built and thrown away like the favorites menu, and for the same reason: what the user sees
+  /// is what `contents` held at the moment of the press, and there is no second copy of the
+  /// list to drift from the counters.
+  @objc private func recentsPressed(_ sender: NSView) {
+    guard let menu = recentsMenu() else { return }
+    let corner = side == .above ? NSPoint(x: 0, y: 0) : NSPoint(x: 0, y: sender.bounds.height)
+    menu.popUp(positioning: nil, at: corner, in: sender)
+  }
+
+  /// The recents menu as it stands right now. Separate from the press so that what the user is
+  /// about to see can be read without running a tracking loop.
+  ///
+  /// Nil when there is nothing recent. The zone asked for no room for the clock in that state,
+  /// so it is only reachable if the contents changed under a press.
+  func recentsMenu() -> NSMenu? {
+    guard let contents, !contents.recents.isEmpty else { return nil }
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    for place in contents.recents {
+      let item = NSMenuItem(
+        title: place.name, action: #selector(recentPressed(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = place.path
+      item.image = NSImage(
+        systemSymbolName: place.pinned ? "pin.fill" : "folder", accessibilityDescription: nil)
+      // The parent folder, so two recents with the same name are still told apart. No chord:
+      // a recent is not a binding, and the fuzzy jump is the keyboard path to one.
+      item.subtitle = place.detail
+      menu.addItem(item)
+    }
+    return menu
+  }
+
+  @objc private func recentPressed(_ sender: NSMenuItem) {
+    guard let path = sender.representedObject as? String else { return }
+    actions?.panelChoseRecent(path)
   }
 
   @objc private func favoritePressed(_ sender: NSMenuItem) {

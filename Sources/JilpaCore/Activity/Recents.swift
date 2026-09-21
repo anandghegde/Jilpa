@@ -66,3 +66,39 @@ public enum Recents {
     return a.location.path.unicodeScalars.lexicographicallyPrecedes(b.location.path.unicodeScalars)
   }
 }
+
+/// One recent folder as a surface draws it (D5).
+///
+/// A `RecentEntry` carries what the counters know: the decayed value, how many uses are behind
+/// it, and the lineage the gate checks a folder exclusion against. None of that belongs on a
+/// menu, and a menu holding it would be a second place a privacy decision could be made. This
+/// is the part that is drawn and pressed, and nothing else crosses into the UI.
+public struct RecentPlace: Sendable, Hashable {
+  /// Canonical, as the file system spelled it when the use was recorded. Going there resolves
+  /// it again: whether the folder is still there is contract 5's question and not this one's.
+  public var path: String
+  /// The folder's own name, which is what the user recognises it by.
+  public var name: String
+  public var pinned: Bool
+
+  public init(path: String, name: String, pinned: Bool = false) {
+    self.path = path
+    self.name = name
+    self.pinned = pinned
+  }
+
+  /// Where the folder is: the second line everywhere a recent is drawn with two.
+  public var detail: String {
+    let parent = (path as NSString).deletingLastPathComponent
+    return parent.isEmpty ? "/" : parent
+  }
+}
+
+extension RecentEntry {
+  /// The entry as the surfaces take it.
+  public var place: RecentPlace {
+    let name = (location.path as NSString).lastPathComponent
+    return RecentPlace(
+      path: location.path, name: name.isEmpty ? location.path : name, pinned: pinned)
+  }
+}

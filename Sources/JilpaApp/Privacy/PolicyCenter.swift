@@ -75,6 +75,16 @@ public final class PolicyCenter: @unchecked Sendable {
     { [self] process in gate.sessionPolicy(GateContext(state: state, app: process.app)) }
   }
 
+  /// The policy for a surface that is about no dialog and no app: the menu bar's recents (S1).
+  ///
+  /// `.showRecentsMenu` needs no known app — it offers what is already stored — so private mode
+  /// and the exclusions are the whole of what the gate has to say about that menu, and this is
+  /// where it says it. Taken fresh on every ask: the menu is rebuilt as it opens, and a policy
+  /// held from the last time it was would be one private mode had already moved.
+  public var menuPolicy: SessionPolicy {
+    gate.sessionPolicy(GateContext(state: state, app: nil))
+  }
+
   public func decision(_ operation: GateOperation, _ process: AppProcess) -> GateDecision {
     gate.decision(operation, GateContext(state: state, app: process.app))
   }

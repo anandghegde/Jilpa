@@ -243,6 +243,99 @@ struct PanelHostTests {
     #expect(listener.removed == ["invoices"])
   }
 
+  // MARK: - The recents menu
+
+  /// The clock is its own control beside the star, and it is there only when there is something
+  /// recent. A menu with nothing in it is a control that lies, here as in the favorites.
+  @Test func theClockIsDrawnOnlyWhenThereAreRecents() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(destination: "Invoices", isEnabled: true, favorites: [invoices]),
+      at: placement(.below))
+    #expect(!host.menusZone.isHidden)
+    #expect(host.recentsButton.isHidden && host.recentsIcon.isHidden)
+    #expect(host.recentsMenu() == nil)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans]))
+    #expect(host.details[.menus] == .full)
+    #expect(!host.favoritesButton.isHidden && !host.recentsButton.isHidden)
+  }
+
+  /// With no favorites and nothing to add, the zone is the clock alone: it is there for the
+  /// recents and asks for room for nothing else.
+  @Test func theZoneIsTheClockAloneWhenThereIsNothingElseToOffer() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(destination: "Invoices", isEnabled: true, recents: [scans]),
+      at: placement(.below))
+    #expect(!host.menusZone.isHidden)
+    #expect(host.favoritesButton.isHidden && host.favoritesIcon.isHidden)
+    #expect(!host.recentsButton.isHidden)
+
+    // And down the side of a dialog there is room for one symbol, which is that one.
+    let side = PanelHost()
+    side.show(
+      PanelContents(destination: "Invoices", isEnabled: true, recents: [scans]),
+      at: placement(.right, length: 400))
+    #expect(side.details[.menus] == .icon)
+    #expect(!side.recentsIcon.isHidden)
+  }
+
+  /// Two menus and one strip: the recents are the control the zone gives up first, because they
+  /// are in the menu bar and in the fuzzy jump as well and the favorites are the user's own list.
+  @Test func theSmallestZoneKeepsTheStar() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans]),
+      at: placement(.right, length: 400))
+    #expect(host.details[.menus] == .compact)
+    #expect(!host.favoritesIcon.isHidden && !host.recentsIcon.isHidden)
+
+    let shorter = PanelHost()
+    shorter.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans]),
+      at: placement(.right, length: 180))
+    #expect(shorter.details[.menus] == .icon)
+    #expect(!shorter.favoritesIcon.isHidden && shorter.recentsIcon.isHidden)
+  }
+
+  /// The menu is what the strip holds, built at the press and thrown away after. A pinned entry
+  /// says so with its symbol; nothing in it is bound to a key, because a recent is not a binding.
+  @Test func theRecentsMenuIsBuiltFromWhatTheStripHolds() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, recents: [pinned, scans, otherScans]),
+      at: placement(.below))
+    let menu = host.recentsMenu()
+    #expect(menu?.items.map(\.title) == ["Archive", "Scans", "Scans"])
+    #expect(menu?.items.allSatisfy { $0.keyEquivalent.isEmpty } == true)
+    // Two recents can share a name, so the second line is what tells them apart.
+    #expect(menu?.items.map(\.subtitle) == ["/Users/ada", "/Users/ada/Work", "/Volumes/Scanner"])
+  }
+
+  /// Every item reports the path it stands for and navigates nothing itself.
+  @Test func eachRecentReportsItsOwnPath() {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(destination: "Invoices", isEnabled: true, recents: [pinned, scans]),
+      at: placement(.below))
+    let menu = host.recentsMenu()!
+    press(menu.items[1])
+    press(menu.items[0])
+    #expect(listener.recents == ["/Users/ada/Work/Scans", "/Users/ada/Archive"])
+  }
+
+  private let scans = RecentPlace(path: "/Users/ada/Work/Scans", name: "Scans")
+  private let otherScans = RecentPlace(path: "/Volumes/Scanner/Scans", name: "Scans")
+  private let pinned = RecentPlace(path: "/Users/ada/Archive", name: "Archive", pinned: true)
+
   private let invoices = FavoritePlace(
     id: "invoices", path: "/Users/ada/Invoices", name: "Invoices",
     hotkey: try! HotkeyChord("ctrl+opt+1"))
@@ -705,6 +798,7 @@ private final class Listener: PanelActions {
   var favorites: [FavoriteID] = []
   var added = 0
   var removed: [FavoriteID] = []
+  var recents: [String] = []
   func panelChoseDestination() { presses += 1 }
   func panelChoseHistory(_ move: HistoryMove) { moves.append(move) }
   func panelChoseJump(_ choice: JumpChoice) { chosen.append(choice) }
@@ -712,4 +806,5 @@ private final class Listener: PanelActions {
   func panelChoseFavorite(_ id: FavoriteID) { favorites.append(id) }
   func panelChoseAddFavorite() { added += 1 }
   func panelChoseRemoveFavorite(_ id: FavoriteID) { removed.append(id) }
+  func panelChoseRecent(_ path: String) { recents.append(path) }
 }

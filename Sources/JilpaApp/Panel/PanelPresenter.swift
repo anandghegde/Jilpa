@@ -71,6 +71,9 @@ public final class PanelPresenter: PanelActions {
   /// Nil when nothing records: the panel then works exactly as it does with one, and no row is
   /// written. Recording never decides anything, so its absence changes no behaviour.
   private let recorder: NavigationRecorder?
+  /// Where a confirmed dialog's folder becomes a counter (D5). Nil when nothing learns, which
+  /// is what the tests and the soak run with and what a build with no store behaves like.
+  private let uses: UseRecorder?
   private var destination: URL
 
   /// The favorites, in the configuration's order (D4). Given by the app, never read from a
@@ -88,6 +91,11 @@ public final class PanelPresenter: PanelActions {
   /// Told when the dialog scope opens and closes. Weak and optional: the presenter works
   /// exactly the same without one, which is what the tests and the soak run with.
   public weak var hotkeys: (any DialogHotkeys)?
+
+  /// Where the recents come from (D5). Weak and optional like the rest: without one the strip
+  /// draws no recents menu at all, which is exactly what a gate refusal looks like, so nothing
+  /// downstream has to tell the two apart.
+  public weak var recentsSource: (any RecentsSource)?
 
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
@@ -114,11 +122,10 @@ public final class PanelPresenter: PanelActions {
   private struct Trail {
     var history: NavigationHistory
     var lastSeen: String?
-    /// The folder the dialog is in, canonical, as the last reading resolved it. What the menu
-    /// offers to add.
-    var folder: String?
-    /// That folder's key, which is what a favorite is compared against.
-    var key: FolderKey?
+    /// The folder the dialog is in, as the last reading resolved it: the path the menu offers
+    /// to add, the key a favorite is compared against, and the lineage the privacy gate checks
+    /// when the dialog is confirmed in it. One value, because all three are one reading.
+    var place: LocationRef?
   }
 
   private struct Shown {
@@ -127,6 +134,10 @@ public final class PanelPresenter: PanelActions {
     var window: AXElement
     var descriptor: DialogDescriptor?
     var variant: DialogVariant
+    /// The gate's answers for this dialog, as the last reading of it carried them. Nil until
+    /// the first reading, which is also while the strip has nothing derived to offer: a recent
+    /// is shown on a gate decision and never on the absence of one.
+    var policy: SessionPolicy?
     /// What the button last said about itself, so the strip can be redrawn without asking the
     /// coordinator again.
     var isEnabled = false
@@ -152,7 +163,8 @@ public final class PanelPresenter: PanelActions {
   public init(
     coordinator: DialogCoordinator, navigator: any Navigating, latch: ActivityLatchMirror,
     pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live,
-    recorder: NavigationRecorder? = nil, tracking: PanelTracking = .live,
+    recorder: NavigationRecorder? = nil, uses: UseRecorder? = nil,
+    tracking: PanelTracking = .live,
     preferred: DockSide = .below, clock: PollClock = .continuous,
     frontmost: @escaping @MainActor () -> pid_t? = {
       NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -165,6 +177,7 @@ public final class PanelPresenter: PanelActions {
     self.host = host
     self.places = places
     self.recorder = recorder
+    self.uses = uses
     self.destination = destination
     self.tracking = tracking
     self.preferred = preferred
@@ -234,6 +247,7 @@ public final class PanelPresenter: PanelActions {
       guard shown?.id == dialog.id else { return }
       shown?.descriptor = dialog.session.descriptor
       shown?.isEnabled = dialog.session.allowsManualNavigation
+      shown?.policy = dialog.policy
       noteFocus(dialog.session.snapshot?.focus)
       noteSession(dialog.session)
       apply()
@@ -256,9 +270,19 @@ public final class PanelPresenter: PanelActions {
       trails[id] = nil
       await recorder?.forget(id)
 
-    case .closed(let dialog), .ended(let dialog):
+    case .closed(let dialog):
+      // The strip goes now. The trail does not: the outcome arrives with `.ended`, after the
+      // evidence window, and a use is counted against the folder the dialog was in when it was
+      // confirmed — which is the last thing this trail holds.
       if shown?.id == dialog.id { dismiss(dialog.id) }
       latch.forget(dialog.id)
+
+    case .ended(let dialog):
+      // `.ended` always follows `.closed`, so the strip is usually already gone; dismissing
+      // again costs nothing and covers an end that arrives without one.
+      if shown?.id == dialog.id { dismiss(dialog.id) }
+      latch.forget(dialog.id)
+      await recordUse(dialog)
       trails[dialog.id] = nil
       await recorder?.forget(dialog.id)
     }
@@ -328,7 +352,7 @@ public final class PanelPresenter: PanelActions {
   /// "Add this folder to Favorites". It writes the configuration and sends nothing to the
   /// dialog, so it is safe at any moment, including in the middle of a move.
   public func panelChoseAddFavorite() {
-    guard let shown, let folder = trails[shown.id]?.folder else { return }
+    guard let shown, let folder = trails[shown.id]?.place?.path else { return }
     do {
       try favoritesEditor?.addFavorite(at: URL(fileURLWithPath: folder, isDirectory: true))
     } catch {
@@ -382,6 +406,72 @@ public final class PanelPresenter: PanelActions {
   private var favoritesUnread: Bool {
     favorites.contains { favoriteKeys[$0.id] == nil }
   }
+
+  // MARK: - The recents
+
+  /// One frecency counter for a dialog that has ended (D5).
+  ///
+  /// The folder is the trail's: the last one a reading resolved for this dialog, which is the
+  /// folder it was confirmed in and not the one the strip suggested. Whether there is a use at
+  /// all is `DestinationUse.confirmed`, which is contract 6 written once and in one place;
+  /// whether it may be written is the gate's, asked with this dialog's own context, which is
+  /// the whole of D5's "excluded apps, private mode and non-recording dialogs add nothing".
+  ///
+  /// Called from `.ended` and from nowhere else. A dialog that closed with no outcome, or with
+  /// one nobody watched, reaches here and adds nothing, which is the point of asking.
+  private func recordUse(_ dialog: ObservedDialog) async {
+    guard let uses, let app = dialog.app.app, let place = trails[dialog.id]?.place,
+      case .ended(let outcome) = dialog.session.phase,
+      let use = DestinationUse.confirmed(
+        app: app, purpose: dialog.session.descriptor.purpose, outcome: outcome,
+        filename: dialog.session.snapshot?.filename, folder: place, at: Date())
+    else { return }
+    guard await uses.record(use, dialog.policy.context) else { return }
+    // Only once a row is really stored. The menus read a cache, and a refresh that follows a
+    // write nobody made would be a read the user's next dialog pays for and learns nothing by.
+    recentsSource?.refresh(dialog.policy.context.state)
+  }
+
+  /// The recents a surface over this dialog may offer, already past the gate.
+  ///
+  /// The scope is the caller's because it is a real choice, not a detail. The strip's menu asks
+  /// for this app's own: in front of an app's Save sheet, where the user puts the things that
+  /// app makes is the better answer. The fuzzy jump asks globally, as the menu bar does,
+  /// because a field the user types a folder name into is no more about this app than the menu
+  /// bar is. Blending the two is the ranker's question in WP7; here each surface asks the one
+  /// it means.
+  ///
+  /// Both go through the dialog's own policy, so a paused or excluded app and a non-recording
+  /// dialog offer nothing, and private mode offers nothing anywhere: a recent is derived, and
+  /// the gate drops everything derived while it is on.
+  private func recents(for shown: Shown, in scope: RecentsScope, limit: Int) -> [RecentPlace] {
+    guard let recentsSource, let policy = shown.policy else { return [] }
+    return recentsSource.recents(scope, on: .dialog, policy: policy, limit: limit)
+  }
+
+  /// The scope the strip's menu means. An app nobody can name falls back to the global list,
+  /// which is the gate's own reading of it: suggesting needs no known app, and every row that
+  /// comes back has already had its own app checked against the exclusions.
+  private func appScope(_ shown: Shown) -> RecentsScope {
+    shown.app.app.map { .app($0) } ?? .everywhere
+  }
+
+  /// A recent folder chosen on the strip, in the menu bar or in the fuzzy jump.
+  ///
+  /// The same request to the Navigator as a favorite, with the same safety checks, and it is
+  /// told apart from one only in what the row records: a favorite is a place the user named and
+  /// a recent is one Jilpa worked out from what they confirmed. A folder that has since moved
+  /// is refused with a reason rather than replaced (contract 5).
+  @discardableResult
+  public func goToRecent(_ path: String) -> Bool {
+    pending = nil
+    guard let shown else { return false }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    pending = Task { await self.move(shown, to: url, trigger: .manual(.recent)) }
+    return true
+  }
+
+  public func panelChoseRecent(_ path: String) { goToRecent(path) }
 
   /// The move the last press started. It is here so the soak can wait for one; the app never
   /// waits, because the press returns to the run loop and the strip updates when the move ends.
@@ -448,8 +538,7 @@ public final class PanelPresenter: PanelActions {
     if let seen, let arrived {
       trail.history.arrived(at: arrived)
       trail.lastSeen = seen.path
-      trail.folder = arrived.path
-      trail.key = arrived.key
+      trail.place = arrived
     }
     trails[dialog.id] = trail
     // A folder the dialog reached without Jilpa is how a navigation of Jilpa's is found to have
@@ -515,8 +604,7 @@ public final class PanelPresenter: PanelActions {
         var trail = trails[target.id] ?? Trail(history: NavigationHistory(original: nil))
         trail.history.arrived(at: place, by: step)
         trail.lastSeen = verified.folder.path
-        trail.folder = place.path
-        trail.key = place.key
+        trail.place = place
         trails[target.id] = trail
       }
     } else {
@@ -570,8 +658,9 @@ public final class PanelPresenter: PanelActions {
       history: HistoryState(
         back: canMove(.back), forward: canMove(.forward),
         returnToOriginal: canMove(.returnToOriginal)),
-      favorites: favorites, folder: trail?.folder,
-      favoriteHere: trail?.key.flatMap(favorite(at:)))
+      favorites: favorites, folder: trail?.place?.path,
+      favoriteHere: trail?.place?.key.flatMap(favorite(at:)),
+      recents: recents(for: shown, in: appScope(shown), limit: RecentsCenter.menuLimit))
   }
 
   /// Which favorite is this folder, if one of them is. By key, never by path: two paths can
@@ -1011,6 +1100,14 @@ public final class PanelPresenter: PanelActions {
       rows.append(
         JumpRow(
           path: place.path, title: place.name, detail: place.detail, source: .favorite))
+    }
+    // Then the recents, globally: the field is not about this app any more than the menu bar
+    // is, and a folder the user confirmed anywhere is a folder they may mean here.
+    for place in recents(for: target, in: .everywhere, limit: RecentsCenter.jumpLimit)
+    where !rows.contains(where: { $0.path == place.path }) {
+      rows.append(
+        JumpRow(
+          path: place.path, title: place.name, detail: place.detail, source: .recent))
     }
     for entry in (trails[target.id]?.history.entries ?? []).reversed()
     where entry.kind == .folder && !rows.contains(where: { $0.path == entry.path }) {

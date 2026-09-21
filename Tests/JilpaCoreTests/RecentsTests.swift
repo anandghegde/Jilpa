@@ -139,3 +139,67 @@ private func list(
     #expect(paths(Exclusions(domains: ["example.com"])) == ["/clients/acme/invoices", "/u/figma", "/u/plain"])
   }
 }
+
+/// Contract 6's half of D5: what a dialog that has ended adds to the counters, and what it does
+/// not. Everything here is one function, because every surface that could decide it a second way
+/// would be a second place the contract could be broken.
+@Suite("What counts as a use") struct DestinationUseTests {
+  private let folder = place("/u/invoices", fileID: 7, under: ["/u"])
+
+  private func use(
+    outcome: DialogOutcome = .confirmed("test"), purpose: Resolved<DialogPurpose> = .known(.save, source: "test"),
+    filename: String? = "Q3 Report.PDF"
+  ) -> DestinationUse? {
+    DestinationUse.confirmed(
+      app: preview, purpose: purpose, outcome: outcome, filename: filename, folder: folder, at: now)
+  }
+
+  @Test func aConfirmedDialogCountsAgainstTheFolderItWasConfirmedIn() throws {
+    let counted = try #require(use(), "a confirmed dialog is a use")
+    #expect(counted.location == folder)
+    #expect(counted.key.app == preview)
+    #expect(counted.key.purpose == .save)
+    // The name is read for its extension and is not kept anywhere.
+    #expect(counted.key.extClass == "pdf")
+    #expect(counted.at == now)
+  }
+
+  @Test func onlyAStandingConfirmationCounts() {
+    #expect(use(outcome: .cancelled("test")) == nil)
+    #expect(use(outcome: .unknown("outcome.no-evidence-source")) == nil)
+    #expect(use(outcome: .retracted(.dialogRepresented)) == nil)
+  }
+
+  /// A counter is keyed by purpose, so a guess would file a save against a dialog that may never
+  /// have been one. Unknown trains nothing, here as everywhere.
+  @Test func anUnknownPurposeCountsNothing() {
+    #expect(use(purpose: .unknown("purpose.unreadable")) == nil)
+  }
+
+  /// An Open dialog has no name field, and a name that is not a short plain token is not one
+  /// either: both land in the empty class rather than in a class made out of the file's name.
+  @Test func aNameThatIsNotAnExtensionBecomesNoClassAtAll() throws {
+    for name in [nil, "Untitled", "notes.a-very-long-suffix"] {
+      #expect(try #require(use(filename: name), "still a use").key.extClass == "")
+    }
+  }
+}
+
+/// The part of a recent that crosses into a menu. Everything else the counters know — the
+/// decayed value, the uses behind it, the lineage the gate checks — stays behind.
+@Suite("Recent places") struct RecentPlaceTests {
+  @Test func aPlaceIsItsNameAndWhereItIs() {
+    let entries = list([stat(place("/Users/ada/Work/Invoices"), uses: 1, pinned: true)])
+    #expect(entries.map(\.place) == [
+      RecentPlace(path: "/Users/ada/Work/Invoices", name: "Invoices", pinned: true)
+    ])
+    #expect(entries.first?.place.detail == "/Users/ada/Work")
+  }
+
+  /// The root has no name of its own and no parent, and a menu row still has to say something.
+  @Test func theRootIsDrawnAsItself() {
+    let entry = list([stat(place("/"), uses: 1)])[0]
+    #expect(entry.place.name == "/")
+    #expect(entry.place.detail == "/")
+  }
+}

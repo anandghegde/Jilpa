@@ -170,6 +170,34 @@ public struct DestinationUse: Sendable, Hashable, Excludable {
   }
 }
 
+extension DestinationUse {
+  /// What a dialog that has ended adds to the counters, or nothing at all (D5).
+  ///
+  /// Contract 6 in one function, so that no surface gets to decide it a second way. A use is
+  /// recorded only on evidence that the user confirmed the dialog: `trains` is true for a
+  /// standing confirmation and for nothing else, so a cancel, a close nobody watched and a
+  /// confirmation that was taken back all add nothing. An unknown purpose adds nothing either —
+  /// a counter is keyed by purpose, and a guess would file a save against a dialog that may
+  /// never have been one.
+  ///
+  /// The file name is read for its extension and is not kept: `FileTypeClass` maps it to a
+  /// coarse class, and anything that is not a short plain token becomes the empty class. The
+  /// context and the source domain are left unnamed because nothing senses them yet; a counter
+  /// that named a context it did not know would be one an exclusion could never suppress.
+  public static func confirmed(
+    app: AppID, purpose: Resolved<DialogPurpose>, outcome: DialogOutcome, filename: String?,
+    folder: LocationRef, at date: Date
+  ) -> DestinationUse? {
+    guard outcome.trains, let purpose = purpose.value else { return nil }
+    return DestinationUse(
+      location: folder,
+      key: DestinationKey(
+        app: app, purpose: purpose,
+        extClass: FileTypeClass.of(filename.map { ($0 as NSString).pathExtension })),
+      at: date)
+  }
+}
+
 /// A destination's counter as stored: the decayed score is as of `counter.updatedAt`.
 public struct DestinationStat: Sendable, Hashable, Excludable {
   public var location: LocationRef

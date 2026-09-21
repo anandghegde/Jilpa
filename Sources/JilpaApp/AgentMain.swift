@@ -58,6 +58,12 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     config.start()
     statusItem.setFavorites(config.favorites)
     statusItem.onChooseFavorite = { [weak self] place in self?.chose(place) }
+    statusItem.onChooseRecent = { [weak self] place in self?.chose(place) }
+    // The recents are taken as the menu opens, not held between openings: the gate is asked
+    // again each time, because private mode may have moved since the last one (S1, contract 7).
+    statusItem.onMenuOpen = { [weak self] in
+      self?.statusItem?.setRecents(self?.agent?.menuRecents() ?? [])
+    }
     // One listener for the whole fan-out, so the surfaces cannot disagree about the order they
     // were told in. The agent may not exist; the menu bar always does.
     config.onChange { [weak self] change in
@@ -72,6 +78,11 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     guard AXTrust.isTrusted else { return }
     let agent = DialogAgent(config: config)
     self.agent = agent
+    // A menu already on screen when a dialog was confirmed does not go on showing the list it
+    // was built with, for the same reason the favorites propagate immediately (D4, D5).
+    agent.onRecentsChange = { [weak self] in
+      self?.statusItem?.setRecents(self?.agent?.menuRecents() ?? [])
+    }
     agent.start()
   }
 
@@ -82,6 +93,12 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   /// path is only taken when no dialog is there to be disturbed (contract 2).
   private func chose(_ place: FavoritePlace) {
     guard agent?.goToFavorite(place.id) != true else { return }
+    NSWorkspace.shared.open(URL(fileURLWithPath: place.path, isDirectory: true))
+  }
+
+  /// A recent chosen in the menu bar, which does the same two jobs as a favorite (D5, S1).
+  private func chose(_ place: RecentPlace) {
+    guard agent?.goToRecent(place.path) != true else { return }
     NSWorkspace.shared.open(URL(fileURLWithPath: place.path, isDirectory: true))
   }
 
@@ -110,7 +127,13 @@ final class DialogAgent {
   /// Every system hotkey the process holds, and the only thing that registers one.
   private let hotkeys = HotkeyCenter()
   private let store: ActivityStore?
+  /// The recents, read once and shared by the strip, the fuzzy jump and the menu bar (D5). Nil
+  /// with no store, and every surface then offers no recents at all.
+  private let recents: RecentsCenter?
   private var tasks: [Task<Void, Never>] = []
+
+  /// The counters moved. The menu bar redraws from this; the strip is the presenter's own.
+  var onRecentsChange: (() -> Void)?
 
   init(config: ConfigCenter) {
     let compat = CompatSource.live()
@@ -133,7 +156,14 @@ final class DialogAgent {
         source: pool, reader: DialogReader(source: pool),
         userActive: { latch.isActive($0) }),
       latch: latch, pool: pool, host: host, destination: Self.walkingSkeletonDestination,
-      recorder: store.map { NavigationRecorder.live($0) })
+      recorder: store.map { NavigationRecorder.live($0) },
+      uses: store.map { UseRecorder.live($0) })
+
+    // The recents come from the same counters the ranker will read in WP7: one record of what
+    // was used, and no surface with a list of its own.
+    recents = store.map { RecentsCenter.live($0) }
+    presenter.recentsSource = recents
+    recents?.onChange { [weak self] in self?.onRecentsChange?() }
 
     // The presenter is what knows whether a supported dialog has the focus of the frontmost app,
     // which is the whole of contract 2's condition for a dialog chord.
@@ -158,6 +188,9 @@ final class DialogAgent {
     // agent, and an agent that has stopped must not keep it alive.
     presenter.favoritesEditor = config
     configChanged(config)
+    // The first read, so the first menu that opens has something in it. Everything after it is
+    // a confirmed dialog or a change of the privacy state.
+    recents?.refresh(policy.state)
   }
 
   /// The configuration was loaded or reloaded (D4).
@@ -174,6 +207,15 @@ final class DialogAgent {
   /// A favorite chosen outside a dialog surface, which is the menu bar. False when no dialog is
   /// under the strip, and then the caller does the other half of S1.
   func goToFavorite(_ id: FavoriteID) -> Bool { presenter.goToFavorite(id) }
+
+  /// The same for a recent (D5).
+  func goToRecent(_ path: String) -> Bool { presenter.goToRecent(path) }
+
+  /// What the menu bar offers now: the global list, gated as a menu about no dialog is.
+  func menuRecents() -> [RecentPlace] {
+    recents?.recents(
+      .everywhere, on: .menu, policy: policy.menuPolicy, limit: RecentsCenter.menuLimit) ?? []
+  }
 
   /// The activity store, or nothing.
   ///
@@ -198,10 +240,14 @@ final class DialogAgent {
     let coordinator = self.coordinator
     // Private mode, a pause or an exclusion changing has to reach both: the watcher stops
     // observing the app, and the coordinator gives up the sessions it holds for it.
-    policy.onChange {
+    policy.onChange { [weak self] in
       Task { @MainActor in
         await watcher.policyChanged()
         await coordinator.policyChanged()
+        // Private mode drops every derived row at the read, so leaving it has to read again to
+        // get them back: the cache is only ever as private as the state it was filled under.
+        guard let self else { return }
+        self.recents?.refresh(self.policy.state)
       }
     }
     tasks = [
