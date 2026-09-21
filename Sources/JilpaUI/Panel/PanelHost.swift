@@ -26,8 +26,8 @@ public struct HistoryState: Sendable, Equatable {
 }
 
 /// What the strip shows. The suggestions zone still carries the one destination the walking
-/// skeleton's button goes to; the ranked set, the menus, the context and the overflow arrive
-/// with the work packages that own their content.
+/// skeleton's button goes to; the ranked set, the context and the overflow arrive with the work
+/// packages that own their content.
 public struct PanelContents: Sendable, Equatable {
   /// The destination's display name, on the chip.
   public var destination: String
@@ -38,15 +38,31 @@ public struct PanelContents: Sendable, Equatable {
   /// choose between lines itself.
   public var notice: Notice?
   public var history: HistoryState
+  /// The favorites, in the configuration's order (D4). The menus zone draws them.
+  public var favorites: [FavoritePlace]
+  /// The folder the dialog is in, as the file system spells it. Nil until a reading has named
+  /// one, and then there is nothing to offer adding: the menus zone lists the favorites and
+  /// nothing else.
+  public var folder: String?
+  /// The favorite that is this folder, when one of them is.
+  ///
+  /// It is the app that decides this, and it decides it by `FolderKey` — the volume's UUID and
+  /// the file identifier — never by comparing two paths as strings. The strip is told the
+  /// answer, so a menu item cannot be the place a folder equality rule is quietly reinvented.
+  public var favoriteHere: FavoriteID?
 
   public init(
     destination: String, isEnabled: Bool, notice: Notice? = nil,
-    history: HistoryState = HistoryState()
+    history: HistoryState = HistoryState(), favorites: [FavoritePlace] = [],
+    folder: String? = nil, favoriteHere: FavoriteID? = nil
   ) {
     self.destination = destination
     self.isEnabled = isEnabled
     self.notice = notice
     self.history = history
+    self.favorites = favorites
+    self.folder = folder
+    self.favoriteHere = favoriteHere
   }
 }
 
@@ -62,6 +78,14 @@ public protocol PanelActions: AnyObject {
   func panelChoseJump(_ choice: JumpChoice)
   /// Escape, or key status lost some other way. Nothing was chosen and nothing is sent.
   func panelClosedJump()
+  /// A favorite chosen from the strip's favorites menu (D4). It is a folder change like any
+  /// other and goes through the Navigator.
+  func panelChoseFavorite(_ id: FavoriteID)
+  /// "Add this folder to Favorites", on the folder the dialog is in (D4). It writes the
+  /// configuration and sends nothing to the dialog.
+  func panelChoseAddFavorite()
+  /// The same item once the folder is already a favorite. It takes the entry back out.
+  func panelChoseRemoveFavorite(_ id: FavoriteID)
 }
 
 /// The strip's one window and its contents (D2).
@@ -137,6 +161,12 @@ public final class PanelHost {
   let noticeZone: NSStackView
   let noticeSymbol: NSImageView
   let notice: NSTextField
+  /// Favorites, and later recents and open Finder windows (D4, D5, D7). One button that pops a
+  /// menu, because the strip has room for a word and the list has none.
+  let menusZone: NSStackView
+  let favoritesButton: StripButton
+  /// What the menus zone shrinks to: the star alone, with the same menu behind it.
+  let favoritesIcon: StripButton
   /// The fuzzy jump, in the same window as the zones and never up at the same time.
   let jump: JumpView
 
@@ -211,7 +241,19 @@ public final class PanelHost {
     noticeZone = NSStackView(views: [noticeSymbol, notice])
     noticeZone.spacing = Self.controlSpacing
 
-    zones = NSStackView(views: [historyZone, suggestionZone, noticeZone])
+    favoritesButton = StripButton()
+    favoritesButton.bezelStyle = .accessoryBar
+    favoritesButton.setButtonType(.momentaryPushIn)
+    favoritesButton.title = String(localized: "Favorites")
+    favoritesButton.image = NSImage(systemSymbolName: "star", accessibilityDescription: nil)
+    favoritesButton.imagePosition = .imageLeading
+    favoritesButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+    favoritesButton.setContentHuggingPriority(.required, for: .horizontal)
+    favoritesIcon = Self.iconButton(symbol: "star")
+    menusZone = NSStackView(views: [favoritesButton, favoritesIcon])
+    menusZone.spacing = Self.controlSpacing
+
+    zones = NSStackView(views: [historyZone, suggestionZone, noticeZone, menusZone])
     zones.orientation = .horizontal
     zones.alignment = .centerY
     zones.spacing = Self.zoneSpacing
@@ -246,6 +288,12 @@ public final class PanelHost {
     button.action = #selector(destinationPressed)
     suggestionIcon.target = self
     suggestionIcon.action = #selector(destinationPressed)
+    for control in [favoritesButton, favoritesIcon] {
+      control.target = self
+      control.action = #selector(favoritesPressed)
+      control.setAccessibilityLabel(String(localized: "Favorites"))
+      control.toolTip = String(localized: "Favorites")
+    }
 
     // Reduce Transparency and Increase Contrast can both be turned on while a dialog is open.
     // Subscribed by selector rather than by block, so there is no token to give back: the
@@ -440,6 +488,7 @@ public final class PanelHost {
     historyZone.orientation = zones.orientation
     suggestionZone.orientation = zones.orientation
     noticeZone.orientation = zones.orientation
+    menusZone.orientation = zones.orientation
 
     let frame = window.frame
     let length = (horizontal ? frame.width : frame.height) - 2 * Self.inset
@@ -470,6 +519,19 @@ public final class PanelHost {
         ZoneDemand(zone: .suggestions, lengths: [.icon: Self.controlLength]))
     }
 
+    // The menus zone is there when it has something to offer: a favorite to go to, or a folder
+    // this dialog is in that could become one. Neither, and it hands in no demand at all.
+    if let contents, !contents.favorites.isEmpty || contents.folder != nil {
+      if horizontal {
+        demands.append(
+          ZoneDemand(
+            zone: .menus, full: max(favoritesButton.fittingSize.width, Self.controlLength),
+            icon: Self.controlLength))
+      } else {
+        demands.append(ZoneDemand(zone: .menus, lengths: [.icon: Self.controlLength]))
+      }
+    }
+
     guard contents?.notice != nil else { return demands }
     if horizontal {
       let line = Self.controlLength + Self.controlSpacing + notice.fittingSize.width
@@ -498,6 +560,11 @@ public final class PanelHost {
     let notice = details[.notice] ?? .hidden
     noticeZone.isHidden = notice == .hidden
     self.notice.isHidden = notice <= .icon
+
+    let menus = details[.menus] ?? .hidden
+    menusZone.isHidden = menus == .hidden
+    favoritesButton.isHidden = menus != .full
+    favoritesIcon.isHidden = menus != .icon
   }
 
   /// The strip is never key, so VoiceOver does not follow a change in it by itself. A notice
@@ -531,6 +598,85 @@ public final class PanelHost {
     case .forward: #selector(forwardPressed)
     case .returnToOriginal: #selector(returnPressed)
     }
+  }
+
+  // MARK: - The favorites menu
+
+  /// Pops the favorites menu under whichever of the two buttons was pressed (D4).
+  ///
+  /// The menu is built here and thrown away when it closes, so it cannot be a second copy of
+  /// the favorites that drifts from the configuration: what the user sees is what `contents`
+  /// held at the moment of the press.
+  ///
+  /// `popUp` runs a tracking loop without activating Jilpa, so the panel stays non-activating
+  /// and the dialog's app stays frontmost (contract 2). The dialog's own hotkeys stay
+  /// registered while the menu is up, which is why no item here carries a key equivalent: the
+  /// chord is already claimed as a system hotkey, and a menu equivalent would be a second claim
+  /// on the same press. The chord is shown instead, in the item's subtitle.
+  @objc private func favoritesPressed(_ sender: NSView) {
+    guard let menu = favoritesMenu() else { return }
+    // Below the button on a strip under the dialog, above it on one over the dialog; AppKit
+    // moves the menu itself when the screen's edge says otherwise.
+    let corner = side == .above ? NSPoint(x: 0, y: 0) : NSPoint(x: 0, y: sender.bounds.height)
+    menu.popUp(positioning: nil, at: corner, in: sender)
+  }
+
+  /// The menu as it stands right now. Separate from the press so that what the user is about to
+  /// see can be read without running a tracking loop.
+  func favoritesMenu() -> NSMenu? {
+    guard let contents else { return nil }
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    for place in contents.favorites {
+      let item = NSMenuItem(
+        title: place.name, action: #selector(favoritePressed(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = place.id.rawValue
+      item.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+      // The parent folder, so two favorites with the same name are still told apart, and the
+      // chord beside it so the user learns the hotkey from the place they already look.
+      item.subtitle = place.hotkey.map { "\($0.symbols)   \(place.detail)" } ?? place.detail
+      item.state = place.id == contents.favoriteHere ? .on : .off
+      menu.addItem(item)
+    }
+
+    if let folder = contents.folder {
+      if !menu.items.isEmpty { menu.addItem(.separator()) }
+      let name = (folder as NSString).lastPathComponent
+      let item: NSMenuItem
+      if let here = contents.favoriteHere {
+        item = NSMenuItem(
+          title: String(localized: "Remove “\(name)” from Favorites"),
+          action: #selector(removeFavoritePressed(_:)), keyEquivalent: "")
+        item.representedObject = here.rawValue
+      } else {
+        item = NSMenuItem(
+          title: String(localized: "Add “\(name)” to Favorites"),
+          action: #selector(addFavoritePressed), keyEquivalent: "")
+      }
+      item.target = self
+      menu.addItem(item)
+    } else if menu.items.isEmpty {
+      // Nothing to go to and nothing to add. The zone asked for no room in this state, so this
+      // is only reachable if the contents changed under an open menu.
+      let empty = NSMenuItem(
+        title: String(localized: "No favorites yet"), action: nil, keyEquivalent: "")
+      empty.isEnabled = false
+      menu.addItem(empty)
+    }
+    return menu
+  }
+
+  @objc private func favoritePressed(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String else { return }
+    actions?.panelChoseFavorite(FavoriteID(rawValue: raw))
+  }
+
+  @objc private func addFavoritePressed() { actions?.panelChoseAddFavorite() }
+
+  @objc private func removeFavoritePressed(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String else { return }
+    actions?.panelChoseRemoveFavorite(FavoriteID(rawValue: raw))
   }
 
   // MARK: - Pieces

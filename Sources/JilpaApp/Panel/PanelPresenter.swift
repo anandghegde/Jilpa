@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import JilpaAX
 import JilpaCompat
+import JilpaConfig
 import JilpaCore
 import JilpaDialog
 import JilpaNavigator
@@ -40,8 +41,13 @@ import JilpaUI
 /// once the host has said that both came back. Nothing is ever sent to the dialog while the
 /// field is up, so every way the jump can end leaves the dialog exactly as the user left it.
 ///
-/// What WP6 adds: the destinations themselves. Here there is one, and it is the same one for
-/// every dialog; the jump offers it and wherever this dialog has already been.
+/// It holds the favorites (WP6, D4): the configuration hands them over, the strip's menu and
+/// the jump's list offer them, and choosing one is the same request to the Navigator as any
+/// other press. Whether the folder a dialog is in *is* one of them is decided by `FolderKey`,
+/// which is the volume and the file identifier and never two paths compared as strings.
+///
+/// What the rest of WP6 adds: the recents, the explicit defaults and the ranked set. Here the
+/// suggestion is still one folder, the same one for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -66,6 +72,18 @@ public final class PanelPresenter: PanelActions {
   /// written. Recording never decides anything, so its absence changes no behaviour.
   private let recorder: NavigationRecorder?
   private var destination: URL
+
+  /// The favorites, in the configuration's order (D4). Given by the app, never read from a
+  /// file here: the presenter draws what it is told and owns no configuration of its own.
+  private var favorites: [FavoritePlace] = []
+  /// Each favorite's folder key, for the one question the strip asks about them: is the folder
+  /// this dialog is in already a favorite? A favorite whose volume is not mounted has no key
+  /// and answers no, which is the honest answer — nothing there is this folder.
+  private var favoriteKeys: [FavoriteID: FolderKey] = [:]
+
+  /// Where a favorite is added and removed. Weak and optional, like the hotkeys: without one
+  /// the menu still offers the favorites and only the add and remove items do nothing.
+  public weak var favoritesEditor: (any FavoritesEditing)?
 
   /// Told when the dialog scope opens and closes. Weak and optional: the presenter works
   /// exactly the same without one, which is what the tests and the soak run with.
@@ -96,6 +114,11 @@ public final class PanelPresenter: PanelActions {
   private struct Trail {
     var history: NavigationHistory
     var lastSeen: String?
+    /// The folder the dialog is in, canonical, as the last reading resolved it. What the menu
+    /// offers to add.
+    var folder: String?
+    /// That folder's key, which is what a favorite is compared against.
+    var key: FolderKey?
   }
 
   private struct Shown {
@@ -266,6 +289,100 @@ public final class PanelPresenter: PanelActions {
   /// Back, Forward or Return to original folder, pressed on the strip.
   public func panelChoseHistory(_ move: HistoryMove) { moveInHistory(move) }
 
+  // MARK: - Favorites
+
+  /// The favorites as the configuration now has them (D4).
+  ///
+  /// Propagation is immediate: the strip is redrawn here, so a favorite added in Settings or by
+  /// hand in the file is in the menu before the user looks at it again. The keys are read off
+  /// the main actor, because a favorite can be on a network mount and a `stat` there blocks for
+  /// as long as the mount takes.
+  public func setFavorites(_ list: [FavoritePlace]) {
+    guard list != favorites else { return }
+    favorites = list
+    // Keys already read are kept, so the common change — one favorite added — reads one folder
+    // and not all of them.
+    favoriteKeys = favoriteKeys.filter { id, _ in list.contains { $0.id == id } }
+    apply()
+    Task { await self.readFavoriteKeys() }
+  }
+
+  /// A favorite chosen on the strip, in the menu bar or by its own chord.
+  ///
+  /// It is a folder change like any other: the same Navigator, the same safety checks, and a
+  /// folder that is not there is refused with a reason rather than replaced (contract 5).
+  /// The answer is whether there was a dialog to ask, not whether the move will succeed: a
+  /// refusal is the Navigator's to give, with its reason on the strip. The menu bar uses it to
+  /// tell the two jobs of one favorite apart — navigate the dialog in front, or open Finder.
+  @discardableResult
+  public func goToFavorite(_ id: FavoriteID) -> Bool {
+    pending = nil
+    guard let shown, let place = favorites.first(where: { $0.id == id }) else { return false }
+    let url = URL(fileURLWithPath: place.path, isDirectory: true)
+    pending = Task { await self.move(shown, to: url, trigger: .manual(.favorite)) }
+    return true
+  }
+
+  public func panelChoseFavorite(_ id: FavoriteID) { goToFavorite(id) }
+
+  /// "Add this folder to Favorites". It writes the configuration and sends nothing to the
+  /// dialog, so it is safe at any moment, including in the middle of a move.
+  public func panelChoseAddFavorite() {
+    guard let shown, let folder = trails[shown.id]?.folder else { return }
+    do {
+      try favoritesEditor?.addFavorite(at: URL(fileURLWithPath: folder, isDirectory: true))
+    } catch {
+      note(shown.id, FavoriteNotices.notWritten(error))
+    }
+    // The strip is not redrawn here. The write raises a configuration change, the app hands the
+    // new list back through `setFavorites`, and the menu is right because the file is — not
+    // because two places guessed the same thing.
+  }
+
+  public func panelChoseRemoveFavorite(_ id: FavoriteID) {
+    guard let shown else { return }
+    do {
+      try favoritesEditor?.removeFavorite(id)
+    } catch {
+      note(shown.id, FavoriteNotices.notWritten(error))
+    }
+  }
+
+  /// Reads the key of every favorite that has not got one yet.
+  ///
+  /// A favorite on a volume that is not mounted has no key and keeps none, so this runs again
+  /// whenever the favorites change and once per dialog whose folder was read while any of them
+  /// was still unanswered. That is what lets a favorite start matching after its volume comes
+  /// back, without reading every favorite on every navigation.
+  private func readFavoriteKeys() async {
+    let wanted = Set(favorites.filter { favoriteKeys[$0.id] == nil }.map(\.path))
+    guard !wanted.isEmpty else { return }
+    let places = places
+    let read = await Task.detached(priority: .utility) { () -> [String: FolderKey] in
+      var found: [String: FolderKey] = [:]
+      for path in wanted {
+        guard let sighting = places.sighting(of: URL(fileURLWithPath: path, isDirectory: true)),
+          sighting.isFolder
+        else { continue }
+        found[path] = .of(sighting)
+      }
+      return found
+    }.value
+    guard !read.isEmpty else { return }
+    // Read again after the wait: the favorites may have changed while the folders were being
+    // looked at, and a key is only kept for a favorite that is still there with that path.
+    for place in favorites where favoriteKeys[place.id] == nil {
+      if let key = read[place.path] { favoriteKeys[place.id] = key }
+    }
+    apply()
+  }
+
+  /// Whether any favorite is still without a key, which is the one thing worth looking again
+  /// for when a dialog names a folder.
+  private var favoritesUnread: Bool {
+    favorites.contains { favoriteKeys[$0.id] == nil }
+  }
+
   /// The move the last press started. It is here so the soak can wait for one; the app never
   /// waits, because the press returns to the run loop and the strip updates when the move ends.
   public private(set) var pending: Task<Void, Never>?
@@ -331,11 +448,17 @@ public final class PanelPresenter: PanelActions {
     if let seen, let arrived {
       trail.history.arrived(at: arrived)
       trail.lastSeen = seen.path
+      trail.folder = arrived.path
+      trail.key = arrived.key
     }
     trails[dialog.id] = trail
     // A folder the dialog reached without Jilpa is how a navigation of Jilpa's is found to have
     // been corrected. The recorder keeps nothing for a dialog it has not moved.
     if let arrived { await recorder?.visited(arrived, in: dialog.id, dialog.policy.context) }
+    // A favorite on a volume that was not mounted the last time it was looked at has no key and
+    // matches nothing. A dialog that just named a folder is the cheap moment to look again, and
+    // only the ones still unanswered are read.
+    if favoritesUnread { await readFavoriteKeys() }
   }
 
   /// Points the strip's one button at another folder. WP6 replaces this outright: the panel
@@ -392,6 +515,8 @@ public final class PanelPresenter: PanelActions {
         var trail = trails[target.id] ?? Trail(history: NavigationHistory(original: nil))
         trail.history.arrived(at: place, by: step)
         trail.lastSeen = verified.folder.path
+        trail.folder = place.path
+        trail.key = place.key
         trails[target.id] = trail
       }
     } else {
@@ -438,12 +563,21 @@ public final class PanelPresenter: PanelActions {
   // MARK: - Contents and placement
 
   private func contents(_ shown: Shown) -> PanelContents {
-    PanelContents(
+    let trail = trails[shown.id]
+    return PanelContents(
       destination: destination.lastPathComponent, isEnabled: shown.isEnabled,
       notice: shown.line.current,
       history: HistoryState(
         back: canMove(.back), forward: canMove(.forward),
-        returnToOriginal: canMove(.returnToOriginal)))
+        returnToOriginal: canMove(.returnToOriginal)),
+      favorites: favorites, folder: trail?.folder,
+      favoriteHere: trail?.key.flatMap(favorite(at:)))
+  }
+
+  /// Which favorite is this folder, if one of them is. By key, never by path: two paths can
+  /// name one folder and one path can name two over a remount.
+  private func favorite(at key: FolderKey) -> FavoriteID? {
+    favorites.first { favoriteKeys[$0.id] == key }?.id
   }
 
   private func going(to folder: URL) -> String {
@@ -869,6 +1003,15 @@ public final class PanelPresenter: PanelActions {
         path: destination.path, title: destination.lastPathComponent,
         detail: destination.deletingLastPathComponent().path, source: .suggestion)
     ]
+    // The favorites next, in the configuration's order: they are the folders the user named,
+    // and the field is the fastest way to one of them. A path already in the list is not
+    // offered twice, which is tidiness and not folder equality: the worst a miss here costs is
+    // a repeated row, and nothing is decided on it.
+    for place in favorites where !rows.contains(where: { $0.path == place.path }) {
+      rows.append(
+        JumpRow(
+          path: place.path, title: place.name, detail: place.detail, source: .favorite))
+    }
     for entry in (trails[target.id]?.history.entries ?? []).reversed()
     where entry.kind == .folder && !rows.contains(where: { $0.path == entry.path }) {
       let url = URL(fileURLWithPath: entry.path, isDirectory: true)

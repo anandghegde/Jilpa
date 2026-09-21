@@ -41,7 +41,9 @@ public enum HotkeyAction: String, Sendable, Hashable, CaseIterable, LogSafe {
 }
 
 /// Which chord each action answers to. Favorites carry their own chord and are not in here:
-/// theirs is one field of a favorite, and this is the fixed set the app ships with (WP6).
+/// theirs is one field of a favorite, and this is the fixed set the app ships with. What a
+/// favorite's chord competes with is this whole table, `HotkeyTarget` says which kind a
+/// registration is, and `HotkeyPlan.registrations` settles the two against each other.
 public struct HotkeyBindings: Sendable, Hashable {
   public private(set) var chords: [HotkeyAction: HotkeyChord]
 
@@ -89,23 +91,96 @@ public struct HotkeyBindings: Sendable, Hashable {
   ])
 }
 
+/// What one registered chord means when it is pressed.
+///
+/// Two kinds, because a favorite's key is one field of the favorite the user added (D4) while
+/// the actions are the fixed set the app ships with. Everything downstream of the plan — what
+/// the centre holds, what a press dispatches to, what the health view lists — is in terms of
+/// this, so neither kind is a special case anywhere but here.
+public enum HotkeyTarget: Sendable, Hashable, LogSafe {
+  case action(HotkeyAction)
+  case favorite(FavoriteID)
+
+  /// A favorite navigates the dialog under the strip, so its chord is held only while a dialog
+  /// holds the keys (contract 2).
+  public var scope: HotkeyScope {
+    switch self {
+    case .action(let action): action.scope
+    case .favorite: .dialog
+    }
+  }
+
+  /// A favorite's id is the folder the user named, so it is not a token a log may carry. That
+  /// one is a favorite at all is the whole of what a log is told.
+  /// The action this target is, when it is one. Nil for a favorite, whose target is a folder
+  /// the user named and not one of the fixed things Jilpa does.
+  public var action: HotkeyAction? {
+    if case .action(let action) = self { action } else { nil }
+  }
+
+  public var logToken: String {
+    switch self {
+    case .action(let action): action.logToken
+    case .favorite: "favorite"
+    }
+  }
+}
+
+/// The plan: what to register, and what the configuration asked for that could not be.
+public struct HotkeyRegistrations: Sendable, Equatable {
+  public var chords: [HotkeyChord: HotkeyTarget]
+  /// Favorites whose chord already meant something else, in the order they were read.
+  ///
+  /// A shadowed favorite is a favorite in every other way: it keeps its place in the menu, on
+  /// the strip and in the fuzzy jump, and only its key is not its own. It is reported rather
+  /// than dropped because a key that silently does nothing is the one kind of conflict the user
+  /// cannot see, and the health view is where they find out (D4, WP9).
+  public var shadowed: [FavoriteID]
+
+  public init(chords: [HotkeyChord: HotkeyTarget] = [:], shadowed: [FavoriteID] = []) {
+    self.chords = chords
+    self.shadowed = shadowed
+  }
+}
+
 /// What is registered now, and what each registered chord means when it is pressed.
 ///
 /// Pure, so the rule can be read and tested without Carbon: the centre takes this answer and
 /// makes the registrations it does not already hold match it.
 public enum HotkeyPlan {
-  /// `answered` is the set of actions something has taken on. It is not a formality: a chord
-  /// registered for an action nothing answers is a key taken from every other app to do
-  /// nothing at all, so a half-built Jilpa holds only the keys it can honour.
+  /// `answered` is the set of actions something has taken on, and `answersFavorites` says the
+  /// same of favorites. It is not a formality: a chord registered for something nothing answers
+  /// is a key taken from every other app to do nothing at all, so a half-built Jilpa holds only
+  /// the keys it can honour.
   public static func registrations(
-    _ bindings: HotkeyBindings, scopes: Set<HotkeyScope>, answered: Set<HotkeyAction>
-  ) -> [HotkeyChord: HotkeyAction] {
-    var plan: [HotkeyChord: HotkeyAction] = [:]
+    _ bindings: HotkeyBindings, favorites: [FavoritePlace] = [], scopes: Set<HotkeyScope>,
+    answered: Set<HotkeyAction>, answersFavorites: Bool = false
+  ) -> HotkeyRegistrations {
+    var plan = HotkeyRegistrations()
     for action in HotkeyAction.allCases where scopes.contains(action.scope) {
       guard answered.contains(action), let chord = bindings[action] else { continue }
       // Declaration order settles a chord two actions ask for. One chord, one registration and
       // one meaning: registering it twice would leave who receives the key to Carbon.
-      if plan[chord] == nil { plan[chord] = action }
+      if plan.chords[chord] == nil { plan.chords[chord] = .action(action) }
+    }
+
+    // Whether a favorite's chord is its own is settled against the whole binding table and not
+    // against what is in scope or answered right now, so that the answer is a fact about the
+    // configuration and does not flicker with the dialog scope. A chord bound to an action this
+    // build answers with nothing yet is still that action's: letting a favorite take it would
+    // move the favorite's key on the release that ships the action.
+    let fixed = Set(bindings.chords.values)
+    var claimed: Set<HotkeyChord> = []
+    for favorite in favorites {
+      guard let chord = favorite.hotkey else { continue }
+      guard !fixed.contains(chord), !claimed.contains(chord) else {
+        plan.shadowed.append(favorite.id)
+        continue
+      }
+      claimed.insert(chord)
+      // In the plan only while a dialog holds the keys and something answers a favorite at all.
+      guard answersFavorites, scopes.contains(.dialog) else { continue }
+      plan.chords[chord] = .favorite(favorite.id)
     }
     return plan
   }

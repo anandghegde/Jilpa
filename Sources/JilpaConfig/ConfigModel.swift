@@ -66,6 +66,25 @@ public struct ConfigModel: Sendable, Equatable {
     contexts.first { $0.value.id == id }?.value
   }
 
+  /// The favorites as every surface draws them, in the merged order: `config.toml` first, then
+  /// `managed.toml`. That order is the one the panel, the menus and the fuzzy jump show, so a
+  /// favorite the user wrote by hand comes before one Jilpa wrote for them.
+  ///
+  /// The origin does not survive: nothing that draws a favorite decides anything by which file
+  /// it came from. What does — whether Jilpa may take it back — is asked of the model by id.
+  public func favoritePlaces(home: String) -> [FavoritePlace] {
+    favorites.map { $0.value.place(home: home) }
+  }
+
+  /// Which file a favorite came from, or nil when there is no such favorite. `config.toml` is
+  /// hand-owned: Jilpa never writes it, so a favorite from there cannot be removed from the UI.
+  public func origin(of id: FavoriteID) -> ConfigOrigin? {
+    favorites.first { $0.value.id == id }?.origin
+  }
+
+  /// Every id in use, across both files, which is what a new favorite's id has to avoid.
+  public var favoriteIDs: Set<FavoriteID> { Set(favorites.map(\.value.id)) }
+
   /// The stored pin in the form resolution takes. Expiry is the resolver's check, not this one's.
   public func resolverPin(home: String) -> Pin? {
     guard let pin else { return nil }

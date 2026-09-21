@@ -16,6 +16,7 @@ struct HotkeyPlanTests {
     bindings: HotkeyBindings = .defaults
   ) -> [HotkeyChord: HotkeyAction] {
     HotkeyPlan.registrations(bindings, scopes: scopes, answered: answered ?? everything)
+      .chords.compactMapValues(\.action)
   }
 
   private func chord(_ spelling: String) -> HotkeyChord { try! HotkeyChord(spelling) }
@@ -81,5 +82,94 @@ struct HotkeyPlanTests {
     // Spike 3b's survey, and the one place the choice is written down. Control+Option is
     // VoiceOver's own modifier and Rectangle recommends it on J, so no default may use it.
     #expect(bound.allSatisfy { $0.modifiers == [.option, .shift, .command] })
+  }
+
+  // MARK: - Favorites (D4)
+
+  private func place(_ id: FavoriteID, _ spelling: String? = nil) -> FavoritePlace {
+    FavoritePlace(
+      id: id, path: "/Users/ada/\(id.rawValue)", name: id.rawValue,
+      hotkey: spelling.map(chord))
+  }
+
+  /// A favorite's chord is always a dialog chord: it navigates the dialog under the strip, and
+  /// there is nothing for it to do when no dialog holds the keys.
+  @Test func aFavoriteChordIsHeldOnlyInsideADialog() {
+    let favorites = [place("invoices", "ctrl+opt+i")]
+    let outside = HotkeyPlan.registrations(
+      .defaults, favorites: favorites, scopes: [.global], answered: everything,
+      answersFavorites: true)
+    #expect(outside.chords[chord("ctrl+opt+i")] == nil)
+    let inside = HotkeyPlan.registrations(
+      .defaults, favorites: favorites, scopes: [.global, .dialog], answered: everything,
+      answersFavorites: true)
+    #expect(inside.chords[chord("ctrl+opt+i")] == .favorite("invoices"))
+  }
+
+  /// The same rule the actions live under: nothing is held for something nothing answers. A
+  /// favorite chord with no handler is a key taken from every other app for nothing.
+  @Test func aFavoriteChordIsHeldOnlyOnceSomethingAnswersIt() {
+    let plan = HotkeyPlan.registrations(
+      .defaults, favorites: [place("invoices", "ctrl+opt+i")], scopes: [.global, .dialog],
+      answered: everything, answersFavorites: false)
+    #expect(plan.chords[chord("ctrl+opt+i")] == nil)
+    #expect(plan.shadowed.isEmpty)
+  }
+
+  /// A favorite may not take a chord one of Jilpa's own actions is bound to. The action wins
+  /// because its binding is the one the user can see and change in one place, and the favorite
+  /// is told it was shadowed rather than quietly losing its key.
+  @Test func aFavoriteNeverTakesAChordAnActionIsBoundTo() {
+    let favorites = [place("invoices", "opt+shift+cmd+["), place("reports", "ctrl+opt+r")]
+    let plan = HotkeyPlan.registrations(
+      .defaults, favorites: favorites, scopes: [.global, .dialog], answered: everything,
+      answersFavorites: true)
+    #expect(plan.chords[chord("opt+shift+cmd+[")] == .action(.back))
+    #expect(plan.chords[chord("ctrl+opt+r")] == .favorite("reports"))
+    #expect(plan.shadowed == ["invoices"])
+  }
+
+  /// Two favorites on one chord: the first in the file keeps it, in the order the user put
+  /// them in, and the second is shadowed.
+  @Test func twoFavoritesOnOneChordLeaveTheSecondShadowed() {
+    let plan = HotkeyPlan.registrations(
+      .defaults, favorites: [place("first", "ctrl+opt+i"), place("second", "ctrl+opt+i")],
+      scopes: [.global, .dialog], answered: everything, answersFavorites: true)
+    #expect(plan.chords[chord("ctrl+opt+i")] == .favorite("first"))
+    #expect(plan.shadowed == ["second"])
+  }
+
+  /// Shadowing is settled against the whole binding table rather than against what is
+  /// registered now, so it is a fact about the configuration that Settings can show. It must
+  /// not flicker as the dialog scope opens and closes.
+  @Test func shadowingDoesNotMoveWithTheDialogScope() {
+    let favorites = [place("invoices", "opt+shift+cmd+[")]
+    for scopes: Set<HotkeyScope> in [[.global], [.global, .dialog]] {
+      let plan = HotkeyPlan.registrations(
+        .defaults, favorites: favorites, scopes: scopes, answered: everything,
+        answersFavorites: true)
+      #expect(plan.shadowed == ["invoices"])
+    }
+    // And the same with nothing answering favorites at all.
+    let unanswered = HotkeyPlan.registrations(
+      .defaults, favorites: favorites, scopes: [.global, .dialog], answered: [],
+      answersFavorites: true)
+    #expect(unanswered.shadowed == ["invoices"])
+  }
+
+  /// A favorite without a chord is most of them. It takes no key and is not shadowed: there is
+  /// nothing to shadow.
+  @Test func aFavoriteWithNoChordTakesNoKey() {
+    let plan = HotkeyPlan.registrations(
+      .defaults, favorites: [place("invoices"), place("reports", "ctrl+opt+r")],
+      scopes: [.global, .dialog], answered: everything, answersFavorites: true)
+    #expect(plan.chords.values.filter { $0.action == nil } == [.favorite("reports")])
+    #expect(plan.shadowed.isEmpty)
+  }
+
+  /// A favorite's id names a folder the user chose, which is not something a log may hold.
+  @Test func aFavoriteTargetLogsAsItsKindAndNotItsId() {
+    #expect(HotkeyTarget.favorite("tax-returns-2019").logToken == "favorite")
+    #expect(HotkeyTarget.action(.back).logToken == HotkeyAction.back.logToken)
   }
 }

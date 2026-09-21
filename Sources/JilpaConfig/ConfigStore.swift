@@ -6,6 +6,16 @@ public enum ConfigWriteError: Error, Sendable, Equatable {
   case io(operation: String, code: Int32)
 }
 
+/// Why an edit to `managed.toml` did not happen. Nothing was written in any of the three cases.
+public enum ConfigEditError: Error, Sendable, Equatable {
+  /// The entry is in `config.toml`, which Jilpa never writes. The user edits that file.
+  case handOwned
+  /// `managed.toml` does not parse. It is rewritten whole, so writing it now would throw away
+  /// whatever is in there; the file is left alone and the health notice says why.
+  case unreadable([ConfigIssue])
+  case write(ConfigWriteError)
+}
+
 /// What was on disk at one moment. Two equal snapshots load to the same model, which is how the
 /// watcher knows a change that changed nothing, its own write included.
 public struct ConfigSnapshot: Sendable, Equatable {
@@ -71,6 +81,36 @@ public struct ConfigStore: Sendable {
     try makeDirectory()
     try replace(url(.managed).path, with: Array(text.utf8))
     return text
+  }
+
+  /// Reads `managed.toml`, lets `edit` change it, and writes it back whole.
+  ///
+  /// The read is from disk every time rather than from a model held in memory, because two
+  /// things in the process write this file — the policy centre's pauses and the config centre's
+  /// favorites — and each must build its new file on whatever the other last left there.
+  ///
+  /// A file that did not parse is refused instead of written: the write replaces the whole file,
+  /// so it would lose every entry the parser could not reach. `edit` returns false when it found
+  /// nothing to do, and then nothing is written at all.
+  ///
+  /// Returns the text written, which is what the watcher compares a change against to know its
+  /// own write, or nil when `edit` changed nothing.
+  @discardableResult
+  public func editManaged(_ edit: (inout ConfigFile) -> Bool) throws(ConfigEditError) -> String? {
+    let snapshot = read()
+    var file = ConfigFile()
+    if let text = snapshot.managed {
+      let parsed = ConfigLoader.parse(text, origin: .managed)
+      let errors = parsed.issues.filter { $0.severity == .error }
+      guard errors.isEmpty else { throw .unreadable(errors) }
+      file = parsed.file
+    } else {
+      // No file is an empty one. A file that exists and could not be read is not.
+      let unreadable = snapshot.unreadable.filter { $0.file == .managed }
+      guard unreadable.isEmpty else { throw .unreadable(unreadable) }
+    }
+    guard edit(&file) else { return nil }
+    do { return try writeManaged(file) } catch { throw .write(error) }
   }
 
   /// The folder is private to the user. One that already exists keeps the mode it has.

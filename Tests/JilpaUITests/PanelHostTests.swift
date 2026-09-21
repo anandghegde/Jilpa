@@ -142,6 +142,118 @@ struct PanelHostTests {
     }
   }
 
+  // MARK: - The favorites menu
+
+  /// The zone asks for room only when it has something to offer, which is a favorite to go to
+  /// or a folder to add. A star that opens an empty menu is a control that lies.
+  @Test func theMenusZoneIsThereOnlyWhenItHasSomethingToOffer() {
+    let host = PanelHost()
+    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    #expect(host.details[.menus] == nil || host.details[.menus] == .hidden)
+    #expect(host.menusZone.isHidden)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], folder: "/Users/ada"))
+    #expect(host.details[.menus] == .full)
+    #expect(!host.menusZone.isHidden)
+    #expect(!host.favoritesButton.isHidden && host.favoritesIcon.isHidden)
+  }
+
+  /// A strip down the side of a dialog has room for a square control and not for a word, so the
+  /// zone shrinks to the star with the same menu behind it.
+  @Test func aVerticalStripDrawsTheStarAlone() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], folder: "/Users/ada"),
+      at: placement(.right, length: 400))
+    #expect(host.details[.menus] == .icon)
+    #expect(host.favoritesButton.isHidden && !host.favoritesIcon.isHidden)
+  }
+
+  /// What the menu holds is what the strip holds: it is built at the press and thrown away
+  /// after, so it cannot drift from the configuration. The chord is drawn beside the folder
+  /// rather than bound as a key equivalent — the same press is already claimed as a system
+  /// hotkey (contract 2).
+  @Test func theMenuIsBuiltFromWhatTheStripHolds() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices, reports],
+        folder: "/Users/ada/Invoices", favoriteHere: "invoices"),
+      at: placement(.below))
+    let menu = host.favoritesMenu()
+    #expect(menu?.items.prefix(2).map(\.title) == ["Invoices", "Reports"])
+    #expect(menu?.items.prefix(2).allSatisfy { $0.keyEquivalent.isEmpty } == true)
+    #expect(menu?.items.first?.subtitle?.contains("⌃⌥1") == true)
+    #expect(menu?.items.first?.subtitle?.contains("/Users/ada") == true)
+    // Two favorites can share a name, so the second line is what tells them apart.
+    #expect(menu?.items[1].subtitle == "/Users/ada")
+    // A tick against the folder the dialog is already in.
+    #expect(menu?.items.first?.state == .on)
+    #expect(menu?.items[1].state == .off)
+  }
+
+  /// The folder the dialog is in is either in the favorites or it is not, and the last item is
+  /// whichever of the two that makes true.
+  @Test func theLastItemAddsOrRemovesTheFolderTheDialogIsIn() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices],
+        folder: "/Users/ada/Reports"),
+      at: placement(.below))
+    #expect(host.favoritesMenu()?.items.last?.title.contains("Reports") == true)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices],
+        folder: "/Users/ada/Invoices", favoriteHere: "invoices"))
+    #expect(host.favoritesMenu()?.items.last?.title.contains("Invoices") == true)
+
+    // A dialog whose folder is not known yet offers no add: there is nothing to name.
+    host.update(
+      PanelContents(destination: "Invoices", isEnabled: true, favorites: [invoices]))
+    #expect(host.favoritesMenu()?.items.count == 1)
+  }
+
+  /// Every item reports which favorite it is and navigates nothing itself.
+  @Test func eachMenuItemReportsItsOwnChoice() {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices, reports],
+        folder: "/Users/ada/Reports"),
+      at: placement(.below))
+    var menu = host.favoritesMenu()!
+    press(menu.items[1])
+    press(menu.items.last!)
+    #expect(listener.favorites == ["reports"])
+    #expect(listener.added == 1)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices],
+        folder: "/Users/ada/Invoices", favoriteHere: "invoices"))
+    menu = host.favoritesMenu()!
+    press(menu.items.last!)
+    #expect(listener.removed == ["invoices"])
+  }
+
+  private let invoices = FavoritePlace(
+    id: "invoices", path: "/Users/ada/Invoices", name: "Invoices",
+    hotkey: try! HotkeyChord("ctrl+opt+1"))
+  private let reports = FavoritePlace(
+    id: "reports", path: "/Users/ada/Reports", name: "Reports")
+
+  private func press(_ item: NSMenuItem) {
+    guard let action = item.action else { return }
+    _ = item.target?.perform(action, with: item)
+  }
+
   // MARK: - The notice line
 
   /// The symbol is the whole zone once the line has been truncated away, so it carries the line
@@ -590,8 +702,14 @@ private final class Listener: PanelActions {
   var moves: [HistoryMove] = []
   var chosen: [JumpChoice] = []
   var closes = 0
+  var favorites: [FavoriteID] = []
+  var added = 0
+  var removed: [FavoriteID] = []
   func panelChoseDestination() { presses += 1 }
   func panelChoseHistory(_ move: HistoryMove) { moves.append(move) }
   func panelChoseJump(_ choice: JumpChoice) { chosen.append(choice) }
   func panelClosedJump() { closes += 1 }
+  func panelChoseFavorite(_ id: FavoriteID) { favorites.append(id) }
+  func panelChoseAddFavorite() { added += 1 }
+  func panelChoseRemoveFavorite(_ id: FavoriteID) { removed.append(id) }
 }

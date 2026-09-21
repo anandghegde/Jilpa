@@ -199,3 +199,17 @@ extension FolderKey {
       : FolderKey("path1:\(identity.volumeUUID):\(sighting.path)")
   }
 }
+
+extension LocationRef {
+  /// This place's own key.
+  ///
+  /// The lineage holds it too, along with every ancestor's and in no order, so it cannot be
+  /// picked out of there. It is rebuilt here from the two fields `FolderKey.of` reads, by that
+  /// same function, so there is still one rule for what a folder's token is.
+  ///
+  /// Nil for a place whose identity was never read. Nil is not "somewhere else": it is no
+  /// answer, and an unanswered comparison decides nothing.
+  public var key: FolderKey? {
+    identity.map { FolderKey.of(LocationSighting(path: path, identity: $0)) }
+  }
+}

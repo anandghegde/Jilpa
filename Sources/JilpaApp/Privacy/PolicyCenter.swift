@@ -3,15 +3,9 @@ import JilpaConfig
 import JilpaCore
 import JilpaDialog
 
-/// Why a pause could not be changed.
-public enum PolicyChangeError: Error, Sendable, Equatable {
-  /// The entry is in `config.toml`, which Jilpa never writes. The user edits that file.
-  case handOwned
-  /// `managed.toml` does not parse. It is rewritten whole, so writing it now would throw away
-  /// whatever is in there; the file is left alone and the health notice says why.
-  case unreadable([ConfigIssue])
-  case write(ConfigWriteError)
-}
+/// Why a pause could not be changed. The same three answers as any other edit to `managed.toml`,
+/// because it is the same edit: the file is read, changed and written back whole.
+public typealias PolicyChangeError = ConfigEditError
 
 /// The one place that holds what Jilpa may do with an app, and the only thing that changes it.
 /// Everything that asks the gate asks it through here: the watcher's one closure, which decides
@@ -146,24 +140,17 @@ public final class PolicyCenter: @unchecked Sendable {
 
   // MARK: -
 
-  /// Reads `managed.toml`, lets `edit` change it, and writes it back whole. Writing a file that
-  /// did not parse would lose everything in it, so such a file is refused instead.
+  /// The read-edit-write of `managed.toml`, which `ConfigStore` owns because two things in the
+  /// process do it.
+  ///
+  /// It goes through the store and not through the config watcher, so the write raises an
+  /// ordinary change: the config centre reloads, hands the model back here, and `configChanged`
+  /// sets the state this call has already set. That round trip is idempotent — the state does
+  /// not move, so nothing is notified twice — and it is what keeps one file with two writers
+  /// honest, because the model in use is always the one that was last read from disk.
   private func writeManaged(_ edit: (inout ConfigFile) -> Bool) throws(PolicyChangeError) {
     guard let store else { return }
-    let snapshot = store.read()
-    var file = ConfigFile()
-    if let text = snapshot.managed {
-      let parsed = ConfigLoader.parse(text, origin: .managed)
-      let errors = parsed.issues.filter { $0.severity == .error }
-      guard errors.isEmpty else { throw .unreadable(errors) }
-      file = parsed.file
-    } else {
-      // No file is an empty one. A file that exists and could not be read is not.
-      let unreadable = snapshot.unreadable.filter { $0.file == .managed }
-      guard unreadable.isEmpty else { throw .unreadable(unreadable) }
-    }
-    guard edit(&file) else { return }
-    do { _ = try store.writeManaged(file) } catch { throw .write(error) }
+    try store.editManaged(edit)
   }
 
   /// The one place the state changes, so every change notifies exactly once and only when

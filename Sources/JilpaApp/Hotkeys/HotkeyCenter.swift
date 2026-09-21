@@ -20,22 +20,33 @@ public protocol DialogHotkeys: AnyObject {
 /// otherwise take a chord from whatever the user is really in front of.
 ///
 /// Nothing is registered for an action that nothing answers. That is what keeps a half-built
-/// Jilpa honest: the picks and fuzzy jump have their chords in the table already and no handler
-/// yet, so their keys still belong to every other app.
+/// Jilpa honest: the picks have their chords in the table already and no handler yet, so their
+/// keys still belong to every other app.
+///
+/// Favorites are the second kind of chord (D4). Theirs comes from the favorite rather than from
+/// the table, so the set moves whenever the configuration does, and it is always a dialog chord:
+/// a favorite navigates the dialog under the strip, and there is nothing for it to do when no
+/// dialog holds the keys.
 @MainActor
 public final class HotkeyCenter: DialogHotkeys {
   public private(set) var bindings: HotkeyBindings
+  /// The favorites whose chords are on offer, in the order the configuration lists them.
+  public private(set) var favorites: [FavoritePlace] = []
   /// Chords this keyboard has no key for. Not conflicts: Carbon reports none (spike 3b).
   public private(set) var unheld: Set<HotkeyChord> = []
+  /// Favorites whose chord was already spoken for. `HotkeyPlan` decides; this is where the
+  /// health view reads it (WP9).
+  public private(set) var shadowedFavorites: [FavoriteID] = []
 
   private let registrar: any HotkeyRegistrar
   private var handlers: [HotkeyAction: () -> Void] = [:]
+  private var favoriteHandler: ((FavoriteID) -> Void)?
   private var scopes: Set<HotkeyScope> = [.global]
   private var held: [HotkeyChord: Held] = [:]
   private var nextID: UInt32 = 1
 
   private struct Held {
-    var action: HotkeyAction
+    var target: HotkeyTarget
     var id: UInt32
   }
 
@@ -71,6 +82,25 @@ public final class HotkeyCenter: DialogHotkeys {
     apply()
   }
 
+  /// What a favorite's chord does. One handler for all of them: which favorite was pressed is
+  /// the chord's own meaning, and it is the plan that knows it.
+  public func answerFavorites(_ body: @escaping (FavoriteID) -> Void) {
+    favoriteHandler = body
+    apply()
+  }
+
+  /// The favorites, whose chords come with them.
+  ///
+  /// `unheld` is cleared only when the chords really moved: it is a fact about this keyboard,
+  /// and a config change that renamed a favorite is no reason to ask Carbon for a key it has
+  /// already refused.
+  public func setFavorites(_ places: [FavoritePlace]) {
+    let before = favorites.compactMap(\.hotkey)
+    favorites = places
+    if places.compactMap(\.hotkey) != before { unheld.removeAll() }
+    apply()
+  }
+
   public func setDialogScope(_ open: Bool) {
     let wanted: Set<HotkeyScope> = open ? [.global, .dialog] : [.global]
     guard wanted != scopes else { return }
@@ -87,11 +117,15 @@ public final class HotkeyCenter: DialogHotkeys {
   }
 
   /// What is registered now and what each chord means. For the health view and for tests.
-  public var registered: [HotkeyChord: HotkeyAction] { held.mapValues(\.action) }
+  public var registered: [HotkeyChord: HotkeyTarget] { held.mapValues(\.target) }
 
   private func apply() {
-    let wanted = HotkeyPlan.registrations(bindings, scopes: scopes, answered: Set(handlers.keys))
-    // Given back first, so a chord that moves from one action to another is never held twice.
+    let plan = HotkeyPlan.registrations(
+      bindings, favorites: favorites, scopes: scopes, answered: Set(handlers.keys),
+      answersFavorites: favoriteHandler != nil)
+    shadowedFavorites = plan.shadowed
+    let wanted = plan.chords
+    // Given back first, so a chord that moves from one target to another is never held twice.
     for (chord, entry) in held where wanted[chord] == nil {
       registrar.unregister(entry.id)
       held[chord] = nil
@@ -99,12 +133,12 @@ public final class HotkeyCenter: DialogHotkeys {
     // What `unheld` holds is a fact about this keyboard, not about the plan, so a chord that
     // left the plan with its scope is not forgotten and not asked for again when it returns.
     // Only new chords or a new layout make the question worth asking again.
-    for (chord, action) in wanted where !unheld.contains(chord) {
+    for (chord, target) in wanted where !unheld.contains(chord) {
       // A chord that changed only its meaning keeps its registration. Handing
       // Option+Shift+Command+J back to the system for the instant between fuzzy jump and Quick
       // Search would be a window in which another app could take it.
       if let entry = held[chord] {
-        held[chord] = Held(action: action, id: entry.id)
+        held[chord] = Held(target: target, id: entry.id)
         continue
       }
       let id = nextID
@@ -113,13 +147,16 @@ public final class HotkeyCenter: DialogHotkeys {
         unheld.insert(chord)
         continue
       }
-      held[chord] = Held(action: action, id: id)
+      held[chord] = Held(target: target, id: id)
     }
   }
 
   private func press(_ id: UInt32) {
     guard let entry = held.values.first(where: { $0.id == id }) else { return }
-    handlers[entry.action]?()
+    switch entry.target {
+    case .action(let action): handlers[action]?()
+    case .favorite(let favorite): favoriteHandler?(favorite)
+    }
   }
 
   @objc private func layoutChanged() {

@@ -66,6 +66,25 @@ public final class ConfigWatcher: @unchecked Sendable {
     if let failure { throw failure }
   }
 
+  /// `ConfigStore.editManaged` with the text remembered, so the event Jilpa's own write causes
+  /// is not reported back to the caller that made it. True when something was written.
+  @discardableResult
+  public func editManaged(_ edit: (inout ConfigFile) -> Bool) throws(ConfigEditError) -> Bool {
+    var written = false
+    let failure: ConfigEditError? = queue.sync {
+      do throws(ConfigEditError) {
+        guard let text = try store.editManaged(edit) else { return nil }
+        seen.managed = text
+        written = true
+        return nil
+      } catch {
+        return error
+      }
+    }
+    if let failure { throw failure }
+    return written
+  }
+
   private func arm() {
     for source in sources { source.cancel() }
     sources = []

@@ -217,4 +217,87 @@ struct ConfigStoreTests {
     let store = ConfigStore(directory: blocker.appendingPathComponent("jilpa"))
     #expect(throws: ConfigWriteError.io(operation: "mkdir", code: ENOTDIR)) { try store.writeManaged(ConfigFile()) }
   }
+
+  // MARK: - Editing what Jilpa owns
+
+  @Test("an edit reads the file, changes it and writes it back whole")
+  func editReadsChangesAndWrites() throws {
+    let (root, store) = try Self.scratch()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var first = ConfigFile()
+    first.favorites = [Favorite(id: "a", path: try FolderPath("~/A"))]
+    try store.writeManaged(first)
+
+    let written = try store.editManaged { file in
+      file.favorites.append(Favorite(id: "b", path: try! FolderPath("~/B")))
+      return true
+    }
+    #expect(written != nil)
+    // Whatever was in the file is still in it: the edit is a read-change-write of the whole
+    // file, not a line appended to it.
+    #expect(store.load().model?.favorites.map(\.value.id) == ["a", "b"])
+  }
+
+  /// An edit that decides there is nothing to do writes nothing at all, so the file keeps its
+  /// modification time and nothing watching it wakes up.
+  @Test("an edit that changes nothing writes nothing")
+  func editThatChangesNothingWritesNothing() throws {
+    let (root, store) = try Self.scratch()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try store.writeManaged(ConfigFile())
+    let before = try FileManager.default.attributesOfItem(atPath: store.url(.managed).path)[.modificationDate] as? Date
+    #expect(try store.editManaged { _ in false } == nil)
+    let after = try FileManager.default.attributesOfItem(atPath: store.url(.managed).path)[.modificationDate] as? Date
+    #expect(before == after)
+  }
+
+  /// The first edit of a fresh install has no file to read, which is not an error: there is
+  /// simply nothing in it yet.
+  @Test("an edit with no file yet starts from an empty one")
+  func editWithNoFileYet() throws {
+    let (root, store) = try Self.scratch()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try store.editManaged { file in
+      file.favorites = [Favorite(id: "a", path: try! FolderPath("~/A"))]
+      return true
+    }
+    #expect(store.load().model?.favorites.map(\.value.id) == ["a"])
+  }
+
+  /// `managed.toml` with something in it Jilpa cannot parse is left exactly as it is.
+  /// Overwriting it would throw away whatever else the file holds, so the edit refuses and the
+  /// caller says why.
+  @Test("an edit refuses a managed file that cannot be read, and writes nothing")
+  func editRefusesAnUnreadableFile() throws {
+    let (root, store) = try Self.scratch()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+    let broken = "[[favorite]]\nid = \"a\"\npath = \"not absolute\"\n"
+    try broken.write(to: store.url(.managed), atomically: true, encoding: .utf8)
+    #expect(throws: ConfigEditError.self) {
+      try store.editManaged { file in
+        file.favorites = []
+        return true
+      }
+    }
+    #expect(try String(contentsOf: store.url(.managed), encoding: .utf8) == broken)
+  }
+
+  /// `config.toml` is the user's own file and is never read into an edit, so nothing Jilpa
+  /// writes can carry an entry out of it into the file Jilpa owns.
+  @Test("an edit never touches the hand-owned file or takes anything from it")
+  func editLeavesTheHandOwnedFileAlone() throws {
+    let (root, store) = try Self.scratch()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+    try architectureExample.write(to: store.url(.handOwned), atomically: true, encoding: .utf8)
+    try store.editManaged { file in
+      file.favorites.append(Favorite(id: "mine", path: try! FolderPath("~/Mine")))
+      return true
+    }
+    #expect(try String(contentsOf: store.url(.handOwned), encoding: .utf8) == architectureExample)
+    let managed = ConfigLoader.parse(
+      try String(contentsOf: store.url(.managed), encoding: .utf8), origin: .managed)
+    #expect(managed.file.favorites.map(\.id) == ["mine"])
+  }
 }

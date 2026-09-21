@@ -62,3 +62,51 @@ public struct HotkeyChord: Sendable, Hashable, CustomStringConvertible {
     (Modifier.allCases.filter(modifiers.contains).map(\.rawValue) + [key]).joined(separator: "+")
   }
 }
+
+extension HotkeyChord {
+  /// The chord as a menu writes it: the modifiers in the order macOS draws them, then the key.
+  ///
+  /// It is drawn beside a favorite so that its key is discoverable, and it is never a menu
+  /// item's key equivalent. The chord is a registered system hotkey, and the registration is
+  /// what answers it (contract 2); a menu item bound to the same keys would either never fire,
+  /// because the registration swallows the press first, or fire twice.
+  public var symbols: String {
+    var text = ""
+    // Control, Option, Shift, Command: the order every macOS menu prints them in.
+    for modifier in [Modifier.control, .option, .shift, .command] where modifiers.contains(modifier) {
+      text += Self.symbol(for: modifier)
+    }
+    return text + Self.symbol(forKey: key)
+  }
+
+  private static func symbol(for modifier: Modifier) -> String {
+    switch modifier {
+    case .control: "\u{2303}"
+    case .option: "\u{2325}"
+    case .shift: "\u{21E7}"
+    case .command: "\u{2318}"
+    }
+  }
+
+  private static func symbol(forKey key: String) -> String {
+    switch key {
+    case "return": "\u{21A9}"
+    case "tab": "\u{21E5}"
+    case "space": "\u{2423}"
+    case "escape": "\u{238B}"
+    case "delete": "\u{232B}"
+    case "forwarddelete": "\u{2326}"
+    case "up": "\u{2191}"
+    case "down": "\u{2193}"
+    case "left": "\u{2190}"
+    case "right": "\u{2192}"
+    case "home": "\u{2196}"
+    case "end": "\u{2198}"
+    case "pageup": "\u{21DE}"
+    case "pagedown": "\u{21DF}"
+    case "plus": "+"
+    // A single character, or a function key: both read as themselves upper-cased.
+    default: key.uppercased()
+    }
+  }
+}

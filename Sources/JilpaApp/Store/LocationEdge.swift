@@ -28,6 +28,23 @@ public struct LocationEdge: Sendable {
   /// is lying, and a record is worth less than an unbounded walk.
   static let depthLimit = 64
 
+  /// What the file system says about one folder, with no walk to the root.
+  ///
+  /// `location(of:)` is what a stored row needs, because the gate checks an exclusion against
+  /// the whole lineage and a row with a hole in it could never be suppressed. This is what a
+  /// comparison needs: `FolderKey.of` turns a sighting into the one token two folders may be
+  /// compared by — the volume's UUID and the file identifier, or the canonical path on a volume
+  /// that has no persistent identifiers — and nothing here compares two paths as strings.
+  ///
+  /// One `stat`, symlinks resolved, nothing listed and nothing downloaded. Nil when the file
+  /// system did not answer, which is not the same as the folder being somewhere else: a favorite
+  /// on an unmounted volume answers nil and is still the folder the user named.
+  public func sighting(of url: URL) -> LocationSighting? {
+    let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+    guard case .found(let item) = look(canonical) else { return nil }
+    return item
+  }
+
   /// The place at `url`, or nil when the file system did not answer for it or for one of its
   /// ancestors.
   ///
