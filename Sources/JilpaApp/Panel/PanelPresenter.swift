@@ -25,9 +25,14 @@ import JilpaUI
 /// level above a modal file panel, so it may only ever show over its own host: it goes away
 /// when that app is not frontmost and comes back with it.
 ///
-/// What WP5 still adds: the zones and their content, the buttons and hotkeys for Back, Forward
-/// and Return to original folder, and the recovery notice. What WP6 adds: the destinations
-/// themselves. Here there is one, and it is the same one for every dialog.
+/// It owns one `NoticeLine` per shown dialog (WP5) and is the only thing that writes to it:
+/// the coordinator's readings put the dialog's own state on it, a move puts its outcome on it,
+/// and the strip draws whichever of them is on top. It also answers the three history controls,
+/// which are `moveInHistory` under another name.
+///
+/// What WP5 still adds: the hotkeys for Back, Forward and Return to original folder, and fuzzy
+/// jump. What WP6 adds: the destinations themselves. Here there is one, and it is the same one
+/// for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -82,8 +87,9 @@ public final class PanelPresenter: PanelActions {
     /// What the button last said about itself, so the strip can be redrawn without asking the
     /// coordinator again.
     var isEnabled = false
-    /// The line under the button, kept for the same reason.
-    var notice: String?
+    /// Everything in force about this dialog. The strip shows the top of it; the rest is still
+    /// true underneath and comes back when the top is cleared.
+    var line = NoticeLine()
     /// Where the strip goes. Nil when no side of the dialog had room, which is not the same as
     /// not having looked yet: the look happens before the strip is first drawn.
     var placement: PanelPlacement?
@@ -176,7 +182,7 @@ public final class PanelPresenter: PanelActions {
       guard shown?.id == dialog.id else { return }
       shown?.descriptor = dialog.session.descriptor
       shown?.isEnabled = dialog.session.allowsManualNavigation
-      shown?.notice = notice(for: dialog.session)
+      noteSession(dialog.session)
       apply()
 
     case .moved(let id):
@@ -220,6 +226,9 @@ public final class PanelPresenter: PanelActions {
     guard let shown else { return }
     pending = Task { await self.move(shown, to: self.destination, trigger: .manual(.panelButton)) }
   }
+
+  /// Back, Forward or Return to original folder, pressed on the strip.
+  public func panelChoseHistory(_ move: HistoryMove) { moveInHistory(move) }
 
   /// The move the last press started. It is here so the soak can wait for one; the app never
   /// waits, because the press returns to the run loop and the strip updates when the move ends.
@@ -299,7 +308,7 @@ public final class PanelPresenter: PanelActions {
   public func setDestination(_ url: URL) {
     destination = url
     guard shown != nil else { return }
-    shown?.notice = nil
+    shown?.line.clear(.unavailable)
     apply()
   }
 
@@ -319,6 +328,13 @@ public final class PanelPresenter: PanelActions {
     guard await coordinator.beginNavigation(target.id, expecting: DialogSession.expectable) == nil
     else { return }
     moving = folder
+    // Everything the strip said about the last move is about to be out of date. Recovery is
+    // not: what a previous move left in this dialog is still there until one arrives.
+    if shown?.id == target.id {
+      shown?.line.clear(NoticeLine.staleOnMove)
+      shown?.line.show(.working, going(to: folder))
+      apply()
+    }
     latch.beginMove(target.id)
     let started = ContinuousClock.now
     let result = await navigator.navigate(request)
@@ -360,7 +376,13 @@ public final class PanelPresenter: PanelActions {
 
     guard shown?.id == target.id else { return }
     shown?.isEnabled = true
-    shown?.notice = notice(for: result)
+    shown?.line.clear(.working)
+    // An arrival is the one thing that settles a recovery notice: the dialog was driven to a
+    // folder and read back there, so whatever a previous move left in it is over.
+    if case .arrived = result { shown?.line.clear(.recovery) }
+    if let notice = NavigationNotices.notice(for: result, going: folder.lastPathComponent) {
+      shown?.line.show(notice)
+    }
     apply()
   }
 
@@ -379,34 +401,43 @@ public final class PanelPresenter: PanelActions {
 
   // MARK: - Contents and placement
 
-  private func contents(enabled: Bool, notice: String?) -> PanelContents {
+  private func contents(_ shown: Shown) -> PanelContents {
     PanelContents(
-      destination: destination.lastPathComponent, isEnabled: enabled, notice: notice)
+      destination: destination.lastPathComponent, isEnabled: shown.isEnabled,
+      notice: shown.line.current,
+      history: HistoryState(
+        back: canMove(.back), forward: canMove(.forward),
+        returnToOriginal: canMove(.returnToOriginal)))
   }
 
-  /// The bare version of WP5's notice line: one reason, no priority between several.
-  private func notice(for session: DialogSession) -> String? {
-    guard !session.allowsManualNavigation else { return nil }
-    switch session.phase {
-    case .recognized: return nil
-    case .navigating:
-      return String(localized: "Going to \((moving ?? destination).lastPathComponent)…")
-    case .closed, .ended: return nil
-    case .ready:
-      return session.isStale
-        ? String(localized: "This dialog is not answering.")
-        : String(localized: "Jilpa cannot change this dialog's folder.")
+  private func going(to folder: URL) -> String {
+    String(localized: "Going to \(folder.lastPathComponent)…")
+  }
+
+  /// The two kinds a reading of the dialog owns, put up or taken down by that reading alone.
+  ///
+  /// Neither touches what a move said. That separation is the whole reason the notice line
+  /// holds one text per kind: a dialog answers with a reading after every folder change, and a
+  /// single slot would wipe "Reports is not there any more" the moment the user clicked
+  /// somewhere in the listing themselves.
+  private func noteSession(_ session: DialogSession) {
+    if case .navigating = session.phase {
+      shown?.line.show(.working, going(to: moving ?? destination))
+    } else {
+      shown?.line.clear(.working)
     }
-  }
-
-  /// The bare notice for a move that did not arrive. It names the reason and nothing else: a
-  /// line per reason, and one that says what state the dialog is in when something was sent,
-  /// is the health view's and WP5's, and every reason is listed there as owed.
-  private func notice(for result: NavigationResult) -> String? {
-    guard let reason = result.reason else { return nil }
-    return result.sent.isEmpty
-      ? String(localized: "Did not go: \(reason).")
-      : String(localized: "Stopped partway: \(reason).")
+    guard case .ready = session.phase, !session.allowsManualNavigation else {
+      shown?.line.clear(.blocked)
+      return
+    }
+    shown?.line.show(
+      .blocked,
+      session.isStale
+        ? String(localized: "This dialog is not answering.")
+        : String(localized: "Jilpa cannot change this dialog's folder."))
+    // A dialog Jilpa is not driving cannot be refused a destination, so a line from the last
+    // move it did drive is about a dialog that no longer exists in that state.
+    shown?.line.clear(.unavailable)
   }
 
   // MARK: - Following the dialog
@@ -471,9 +502,7 @@ public final class PanelPresenter: PanelActions {
     switch visibility {
     case .shown(let placement):
       guard let shown else { return }
-      host.show(
-        contents(enabled: shown.isEnabled, notice: shown.notice), at: placement,
-        fading: tracking == .fadeOnMove)
+      host.show(contents(shown), at: placement, fading: tracking == .fadeOnMove)
     case .away(.noDialog):
       host.hide()
     case .away(.moving):

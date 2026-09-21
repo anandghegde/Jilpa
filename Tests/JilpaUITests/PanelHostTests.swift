@@ -67,14 +67,18 @@ struct PanelHostTests {
   /// that comes and goes under the pointer is worse than one that says no.
   @Test func aDialogThatCannotBeNavigatedDimsTheButton() {
     let host = PanelHost()
-    host.update(
-      PanelContents(destination: "Invoices", isEnabled: false, notice: "Cannot change folder."))
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: false,
+        notice: Notice(.blocked, "Cannot change folder.")),
+      at: placement(.below))
     #expect(!host.button.isEnabled)
+    #expect(!host.suggestionIcon.isEnabled)
     #expect(!host.notice.isHidden)
     #expect(host.notice.stringValue == "Cannot change folder.")
 
     host.update(PanelContents(destination: "Invoices", isEnabled: true))
-    #expect(host.notice.isHidden)
+    #expect(host.noticeZone.isHidden)
   }
 
   @Test func theButtonReportsThePress() {
@@ -92,21 +96,187 @@ struct PanelHostTests {
     let host = PanelHost()
     host.update(PanelContents(destination: "Invoices", isEnabled: true))
     host.button.performClick(nil)
+    for control in host.historyButtons.values { control.performClick(nil) }
+  }
+
+  // MARK: - The history controls
+
+  /// A move with nowhere to go dims. The three controls are a fixed shape the eye learns, and
+  /// one that comes and goes under the pointer is worse than a dim one.
+  @Test func theHistoryControlsFollowWhatTheHistoryCanDo() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        history: HistoryState(back: true, forward: false, returnToOriginal: true)),
+      at: placement(.below))
+    #expect(host.historyButtons[.back]?.isEnabled == true)
+    #expect(host.historyButtons[.forward]?.isEnabled == false)
+    #expect(host.historyButtons[.returnToOriginal]?.isEnabled == true)
+    // Dim, not gone.
+    #expect(host.historyButtons[.forward]?.isHidden == false)
+  }
+
+  /// Each control says which move it is, and the host knows nothing else about it.
+  @Test func eachHistoryControlReportsItsOwnMove() {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        history: HistoryState(back: true, forward: true, returnToOriginal: true)),
+      at: placement(.below))
+
+    host.historyButtons[.back]?.performClick(nil)
+    host.historyButtons[.returnToOriginal]?.performClick(nil)
+    #expect(listener.moves == [.back, .returnToOriginal])
+    #expect(listener.presses == 0)
+  }
+
+  @Test func everyHistoryControlHasALabelAndATooltip() {
+    let host = PanelHost()
+    for (_, control) in host.historyButtons {
+      #expect(control.accessibilityLabel()?.isEmpty == false)
+      #expect(control.toolTip?.isEmpty == false)
+    }
+  }
+
+  // MARK: - The notice line
+
+  /// The symbol is the whole zone once the line has been truncated away, so it carries the line
+  /// for VoiceOver whatever the strip's length.
+  @Test func theNoticeCarriesItsLineOnItsSymbolAndInItsTooltip() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        notice: Notice(.unavailable, "Reports is not there any more.")),
+      at: placement(.below))
+    #expect(!host.noticeZone.isHidden)
+    #expect(host.noticeSymbol.image != nil)
+    #expect(host.noticeSymbol.accessibilityLabel() == "Reports is not there any more.")
+    #expect(host.noticeZone.toolTip == "Reports is not there any more.")
+  }
+
+  /// A recovery notice is the one a user must not miss: it is the only kind that can mean the
+  /// dialog is not as they left it.
+  @Test func aRecoveryNoticeIsMarkedApartFromTheOthers() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        notice: Notice(.recovery, "Its Go to Folder box is still open.")),
+      at: placement(.below))
+    #expect(host.noticeSymbol.contentTintColor == .systemOrange)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, notice: Notice(.working, "Going to Invoices…")))
+    #expect(host.noticeSymbol.contentTintColor == nil)
+  }
+
+  // MARK: - The chrome
+
+  /// Liquid Glass, and what stands in for it. The settings themselves belong to the machine the
+  /// tests run on; what is pinned here is that the strip follows them, and that the zones are
+  /// drawn in exactly one place either way — the glass owns them or the view does, never both.
+  @Test func theStripFollowsTheAccessibilityDisplayOptions() {
+    let host = PanelHost()
+    let workspace = NSWorkspace.shared
+    #expect(
+      host.background.isOpaqueMaterial == workspace.accessibilityDisplayShouldReduceTransparency)
+    #expect(host.background.hasBorder == workspace.accessibilityDisplayShouldIncreaseContrast)
+    #expect(host.background.layer?.borderWidth == (host.background.hasBorder ? 1 : 0))
+
+    let owner = host.zones.superview
+    #expect(owner != nil)
+    #expect(host.background.isOpaqueMaterial == (owner === host.background))
+    // Asked again, the answer does not move: a setting that has not changed redraws nothing.
+    host.background.refresh()
+    #expect(host.zones.superview === owner)
+  }
+
+  // MARK: - Sharing the strip
+
+  /// The wireframe's collapse, from the outside: a strip with room draws the destination's
+  /// name, and one without draws the folder symbol in its place rather than dropping the zone.
+  @Test func aStripWithRoomDrawsEveryZoneWhole() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        notice: Notice(.unavailable, "Reports is not there any more."),
+        history: HistoryState(back: true)),
+      at: placement(.below, length: 900))
+    #expect(host.details[.history] == .full)
+    #expect(host.details[.suggestions] == .full)
+    #expect(host.details[.notice] == .full)
+    #expect(!host.button.isHidden && host.suggestionIcon.isHidden)
+    #expect(!host.notice.isHidden)
+  }
+
+  /// A zone gives up detail before any zone gives up its place, and the suggestions give up
+  /// first of the two that are drawn here: the history controls are what a narrow dialog still
+  /// needs, and a folder symbol still navigates.
+  @Test func aNarrowStripCollapsesTheChipBeforeTheHistory() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(destination: "Quarterly Invoices Awaiting Approval", isEnabled: true),
+      at: placement(.below, length: 130))
+    #expect(host.details[.suggestions] == .icon)
+    #expect(host.details[.history] != .hidden)
+    #expect(host.button.isHidden && !host.suggestionIcon.isHidden)
+    // The name is gone from the strip but not from the keyboard or from VoiceOver.
+    #expect(
+      host.suggestionIcon.accessibilityLabel()?.contains("Quarterly Invoices Awaiting Approval")
+        == true)
+  }
+
+  /// A strip down the side of a dialog is `thickness` points across, which is room for a square
+  /// control and not for a word, so the zones that carry text offer only their icon.
+  @Test func aVerticalStripDrawsIconsOnly() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        notice: Notice(.unavailable, "Reports is not there any more.")),
+      at: placement(.right, length: 400))
+    #expect(host.zones.orientation == .vertical)
+    #expect(host.details[.suggestions] == .icon)
+    #expect(host.details[.notice] == .icon)
+    #expect(host.button.isHidden && host.notice.isHidden)
+    #expect(host.noticeSymbol.accessibilityLabel() == "Reports is not there any more.")
+  }
+
+  /// Return to original folder is the step the history zone gives up first: it has a hotkey of
+  /// its own, and Back repeated reaches the same place.
+  @Test func theHistoryZoneGivesUpReturnBeforeBackAndForward() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Quarterly Invoices Awaiting Approval", isEnabled: true,
+        notice: Notice(.unavailable, "Reports is not there any more."),
+        history: HistoryState(back: true, forward: true, returnToOriginal: true)),
+      at: placement(.below, length: 160))
+    #expect(host.details[.history] == .compact)
+    #expect(host.historyButtons[.returnToOriginal]?.isHidden == true)
+    #expect(host.historyButtons[.back]?.isHidden == false)
   }
 
   // MARK: - Following the dialog
 
   /// The move-and-resize path runs once per display refresh for as long as a drag lasts, so it
-  /// does the frame and the side and nothing else.
+  /// does the frame, the side and the fit a new length changes, and nothing else.
   @Test func movingTakesTheFrameAndTheSideAndLeavesTheContents() {
     let host = PanelHost()
     host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
-    #expect(host.stack.orientation == .horizontal)
+    #expect(host.zones.orientation == .horizontal)
 
     let side = CGRect(x: 600, y: 200, width: PanelHost.thickness, height: 400)
     host.move(to: PanelPlacement(frame: side, side: .right, screen: 0, isInsideParent: false))
     #expect(host.window.frame == side)
-    #expect(host.stack.orientation == .vertical)
+    #expect(host.zones.orientation == .vertical)
     // The contents were never touched.
     #expect(host.button.title == "Invoices" && host.isVisible)
   }
@@ -117,7 +287,9 @@ struct PanelHostTests {
   @Test func withdrawingKeepsWhatTheStripSaid() {
     let host = PanelHost()
     host.show(
-      PanelContents(destination: "Invoices", isEnabled: true, notice: "Read-only folder."),
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        notice: Notice(.unavailable, "Read-only folder.")),
       at: placement(.below))
     host.withdraw(fading: false)
     #expect(!host.isVisible)
@@ -149,7 +321,8 @@ struct PanelHostTests {
   /// forgets rather than deduplicating against it.
   @Test func hidingForgetsWhatTheStripSaid() {
     let host = PanelHost()
-    let contents = PanelContents(destination: "Invoices", isEnabled: true, notice: "Saved.")
+    let contents = PanelContents(
+      destination: "Invoices", isEnabled: true, notice: Notice(.working, "Saved."))
     host.show(contents, at: placement(.below))
     host.hide()
 
@@ -180,15 +353,19 @@ struct PanelHostTests {
     #expect(ticks == 0)
   }
 
-  private func placement(_ side: DockSide) -> PanelPlacement {
-    PanelPlacement(
-      frame: CGRect(x: 120, y: 80, width: 400, height: PanelHost.thickness), side: side,
-      screen: 0, isInsideParent: false)
+  private func placement(_ side: DockSide, length: CGFloat = 600) -> PanelPlacement {
+    let frame =
+      side.isHorizontal
+      ? CGRect(x: 120, y: 80, width: length, height: PanelHost.thickness)
+      : CGRect(x: 120, y: 80, width: PanelHost.thickness, height: length)
+    return PanelPlacement(frame: frame, side: side, screen: 0, isInsideParent: false)
   }
 }
 
 @MainActor
 private final class Listener: PanelActions {
   var presses = 0
+  var moves: [HistoryMove] = []
   func panelChoseDestination() { presses += 1 }
+  func panelChoseHistory(_ move: HistoryMove) { moves.append(move) }
 }
