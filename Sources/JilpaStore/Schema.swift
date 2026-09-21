@@ -6,7 +6,7 @@ enum Schema {
 
   /// Tables that exist for a later work package and have no write API yet, so the export does
   /// not cover them. A test fails when a table is neither exported nor named here.
-  static let tablesWithoutWriter: Set<String> = ["nav_attempt", "consent", "save_outcome"]
+  static let tablesWithoutWriter: Set<String> = ["consent", "save_outcome"]
 
   static var migrator: DatabaseMigrator {
     var migrator = DatabaseMigrator()
@@ -63,12 +63,18 @@ enum Schema {
       PRIMARY KEY (session_id, rank)
     );
     CREATE TABLE nav_attempt (
-      id INTEGER PRIMARY KEY, session_id TEXT, seq INTEGER,
+      id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
       at REAL NOT NULL,
-      trigger TEXT, strategy TEXT, target_location INTEGER REFERENCES location(id),
-      result TEXT, reason TEXT, latency_ms INTEGER,
+      -- An attempt is written while the dialog is open, so its session row does not exist yet
+      -- and may never: it carries its own app, because a read with no app cannot be filtered.
+      app TEXT NOT NULL,
+      trigger TEXT NOT NULL, strategy TEXT, target_location INTEGER REFERENCES location(id),
+      result TEXT NOT NULL, reason TEXT, latency_ms INTEGER,
       corrected INTEGER NOT NULL DEFAULT 0, safety_flags INTEGER NOT NULL DEFAULT 0
     );
+    -- An attempt is named by its dialog and its number, so writing one again replaces it: that
+    -- is how a correction found later is recorded.
+    CREATE UNIQUE INDEX nav_attempt_of_session ON nav_attempt(session_id, seq);
     -- SQLite treats NULLs in a primary key as distinct, so the optional parts of the key are
     -- '' and never NULL.
     CREATE TABLE dest_stat (

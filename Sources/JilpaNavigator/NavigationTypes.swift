@@ -4,17 +4,8 @@ import JilpaCompat
 import JilpaCore
 import JilpaDialog
 
-/// Who asked for the folder. A manual request is the user acting through Jilpa's own UI, which
-/// beats every automation for the rest of that dialog (contract 4).
-public enum ManualSource: String, Sendable, Hashable, CaseIterable, LogSafe {
-  case panelButton = "panel-button"
-  case favorite
-  case quickSearch = "quick-search"
-  case hotkey
-  case pathEntry = "path-entry"
-  case automationService = "automation-service"
-}
-
+/// What asked for the folder. `ManualSource` and the flattened `NavigationTriggerKind` a row
+/// keeps are Core's; this is the live one, which carries which rule or which default it was.
 public enum NavigationTrigger: Sendable, Hashable {
   case manual(ManualSource)
   case automation(AutomationTrigger)
@@ -22,9 +13,16 @@ public enum NavigationTrigger: Sendable, Hashable {
 
   /// True for the triggers that need consent under contract 3. The Navigator does not decide
   /// consent; this is here so the caller cannot forget which kind it is holding.
-  public var isAutomatic: Bool {
-    if case .automation = self { return true }
-    return false
+  public var isAutomatic: Bool { kind.isAutomatic }
+
+  /// What a `nav_attempt` row keeps: the same three kinds with the automation's own details
+  /// left behind, because the row names the rule nowhere.
+  public var kind: NavigationTriggerKind {
+    switch self {
+    case .manual(let source): .manual(source)
+    case .automation(let trigger): .automation(trigger.kind)
+    case .history(let move): .history(move)
+    }
   }
 }
 
@@ -224,13 +222,40 @@ public enum NavigationResult: Sendable, Hashable {
   }
 
   /// For the notice line and for `nav_attempt`: `arrived`, `refused`, `aborted` or `failed`.
-  public var name: String {
+  public var kind: NavigationOutcomeKind {
     switch self {
-    case .arrived: "arrived"
-    case .refused: "refused"
-    case .aborted: "aborted"
-    case .failed: "failed"
+    case .arrived: .arrived
+    case .refused: .refused
+    case .aborted: .aborted
+    case .failed: .failed
     }
+  }
+
+  public var name: String { kind.rawValue }
+
+  /// What contract 1 asks about a move after it has ended, as the flags a row keeps.
+  ///
+  /// A refusal sent nothing, so it has none. An arrival can still carry them: the folder was
+  /// reached and something about the dialog did not come back the way it went in, which is
+  /// exactly the case a reliability report must not lose.
+  public var safety: SafetyFlags {
+    var flags: SafetyFlags = []
+    if !sent.isEmpty { flags.insert(.inputSent) }
+    switch self {
+    case .arrived(let arrival):
+      if arrival.nameKept == false { flags.insert(.nameNotKept) }
+      if arrival.selectionKept == false { flags.insert(.selectionNotKept) }
+      if !arrival.focusRestored { flags.insert(.focusNotRestored) }
+    case .refused:
+      break
+    case .aborted(_, let recovery), .failed(_, let recovery):
+      switch recovery.state {
+      case .untouched: break
+      case .goToFolderLeftOpen: flags.insert(.dialogLeftOpen)
+      case .unknown: flags.insert(.stateUnknown)
+      }
+    }
+    return flags
   }
 
   /// The reason, as the health view and the diagnostics name it. Nil for an arrival.

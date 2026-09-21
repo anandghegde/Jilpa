@@ -598,12 +598,14 @@ CREATE TABLE shadow_rank (
   PRIMARY KEY (session_id, rank)
 );
 CREATE TABLE nav_attempt (
-  id INTEGER PRIMARY KEY, session_id TEXT, seq INTEGER,
+  id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
   at REAL NOT NULL,                    -- retention is by age, and an attempt can outlive its session row
-  trigger TEXT, strategy TEXT, target_location INTEGER REFERENCES location(id),
-  result TEXT, reason TEXT, latency_ms INTEGER,
+  app TEXT NOT NULL,                   -- its own, because that session row may never exist to be joined
+  trigger TEXT NOT NULL, strategy TEXT, target_location INTEGER REFERENCES location(id),
+  result TEXT NOT NULL, reason TEXT, latency_ms INTEGER,
   corrected INTEGER NOT NULL DEFAULT 0, safety_flags INTEGER NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX nav_attempt_of_session ON nav_attempt(session_id, seq);  -- writing one again replaces it
 CREATE TABLE dest_stat (                -- decayed counters behind frecency and recents
   location_id INTEGER NOT NULL REFERENCES location(id),
   app TEXT NOT NULL, purpose TEXT NOT NULL,

@@ -16,6 +16,11 @@ enum Stored {
     "source_evidence",
   ]
 
+  static let attemptColumns = [
+    "session_id", "seq", "at", "app", "trigger", "strategy", "target_location", "result",
+    "reason", "latency_ms", "corrected", "safety_flags",
+  ]
+
   static let statKeyMatch = """
     location_id = ? AND app = ? AND purpose = ? AND ext_class = ? AND context_id = ? \
     AND source_domain = ?
@@ -147,6 +152,32 @@ enum Stored {
       autoTrigger: trigger.flatMap(AutoTriggerKind.init(rawValue:)), holdout: row["holdout"],
       source: source(row["source_domain"], evidence: row["source_evidence"]),
       shadow: shadow(row["shadow_hit"]))
+  }
+
+  /// Milliseconds, rounded, for the `latency_ms` column. A duration is nanoseconds here and a
+  /// whole millisecond in the row: nothing reads an attempt more finely than that.
+  static func milliseconds(_ duration: Duration?) -> Int? {
+    duration.map { Int(($0.components.seconds * 1000) + ($0.components.attoseconds / 1_000_000_000_000_000)) }
+  }
+
+  /// Nil for an attempt whose trigger or result this version cannot read. Such a row is left
+  /// where it is and shown to nobody, rather than counted as something it may not be.
+  static func attempt(_ row: Row, _ locations: [Int64: LocationRef]) -> NavigationAttemptRecord? {
+    let trigger: String = row["trigger"]
+    let result: String = row["result"]
+    guard let trigger = NavigationTriggerKind(stored: trigger),
+      let result = NavigationOutcomeKind(rawValue: result)
+    else { return nil }
+    let target: Int64? = row["target_location"]
+    let latency: Int? = row["latency_ms"]
+    let app: String = row["app"]
+    let session: String = row["session_id"]
+    return NavigationAttemptRecord(
+      session: SessionID(rawValue: session), seq: row["seq"],
+      at: Date(timeIntervalSince1970: row["at"]), app: AppID(app), trigger: trigger,
+      strategy: row["strategy"], target: target.flatMap { locations[$0] }, result: result,
+      reason: row["reason"], latency: latency.map { .milliseconds($0) },
+      corrected: row["corrected"], safety: SafetyFlags(rawValue: row["safety_flags"]))
   }
 
   /// Nil for a counter whose purpose this version does not know or whose location is gone:

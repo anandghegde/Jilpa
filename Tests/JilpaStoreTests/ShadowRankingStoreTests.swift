@@ -163,7 +163,7 @@ struct ShadowRankingStoreTests {
 
     let export = try await store.export(at: t0, for: .cli, withoutDomain)
     #expect(export.rankings.map(\.session) == ["names-acme", "plain"])
-    #expect(export.withheld == ActivityExport.Withheld(sessions: 1, destinations: 0, configured: 0, rankings: 1))
+    #expect(export.withheld == ActivityExport.Withheld(sessions: 1, destinations: 0, configured: 0, rankings: 1, attempts: 0))
   }
 
   @Test("what this version cannot read counts neither way")

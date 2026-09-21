@@ -32,6 +32,9 @@ public final class PanelPresenter: PanelActions {
   private let pool: AXSessionPool
   private let host: PanelHost
   private let places: LocationEdge
+  /// Nil when nothing records: the panel then works exactly as it does with one, and no row is
+  /// written. Recording never decides anything, so its absence changes no behaviour.
+  private let recorder: NavigationRecorder?
   private var destination: URL
 
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
@@ -63,7 +66,8 @@ public final class PanelPresenter: PanelActions {
 
   public init(
     coordinator: DialogCoordinator, navigator: any Navigating, latch: ActivityLatchMirror,
-    pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live
+    pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live,
+    recorder: NavigationRecorder? = nil
   ) {
     self.coordinator = coordinator
     self.navigator = navigator
@@ -71,6 +75,7 @@ public final class PanelPresenter: PanelActions {
     self.pool = pool
     self.host = host
     self.places = places
+    self.recorder = recorder
     self.destination = destination
     host.actions = self
   }
@@ -92,6 +97,7 @@ public final class PanelPresenter: PanelActions {
     host.hide()
     shown = nil
     trails.removeAll()
+    if let recorder { Task { await recorder.forgetAll() } }
   }
 
   // MARK: - The stream
@@ -128,11 +134,13 @@ public final class PanelPresenter: PanelActions {
       if shown?.id == id { dismiss(id) }
       latch.forget(id)
       trails[id] = nil
+      await recorder?.forget(id)
 
     case .closed(let dialog), .ended(let dialog):
       if shown?.id == dialog.id { dismiss(dialog.id) }
       latch.forget(dialog.id)
       trails[dialog.id] = nil
+      await recorder?.forget(dialog.id)
     }
   }
 
@@ -218,6 +226,9 @@ public final class PanelPresenter: PanelActions {
       trail.lastSeen = seen.path
     }
     trails[dialog.id] = trail
+    // A folder the dialog reached without Jilpa is how a navigation of Jilpa's is found to have
+    // been corrected. The recorder keeps nothing for a dialog it has not moved.
+    if let arrived { await recorder?.visited(arrived, in: dialog.id, dialog.policy.context) }
   }
 
   /// Points the strip's one button at another folder. WP6 replaces this outright: the panel
@@ -246,25 +257,37 @@ public final class PanelPresenter: PanelActions {
     else { return }
     moving = folder
     latch.beginMove(target.id)
+    let started = ContinuousClock.now
     let result = await navigator.navigate(request)
+    let latency = ContinuousClock.now - started
     latch.endMove(target.id)
     moving = nil
     lastResult = result
     // An arrival is the one reading the Navigator stands behind, so it becomes the session's
     // new baseline. Anything else hands back nothing and the coordinator reads again.
     var arrival: DialogSnapshot?
+    var place: LocationRef?
     if case .arrived(let verified) = result {
       arrival = verified.reading
+      place = await locate(verified.folder)
       // Before `endNavigation`, so the reading it announces finds the history already there and
       // reads as the same folder rather than as a navigation of its own. A move that did not
       // arrive moves nothing: the dialog is wherever it was, which the history already says.
-      if let place = await locate(verified.folder) {
+      if let place {
         var trail = trails[target.id] ?? Trail(history: NavigationHistory(original: nil))
         trail.history.arrived(at: place, by: step)
         trail.lastSeen = verified.folder.path
         trails[target.id] = trail
       }
+    } else {
+      // The row still names where the move was going, when the file system will name it. A
+      // refusal for a folder that is not there leaves it unnamed, which is what nil says.
+      place = await locate(folder)
     }
+    // Before `endNavigation` as well, and for the same kind of reason: the reading it announces
+    // can be a navigation of the user's, and a correction of this attempt is only a correction
+    // if this attempt is already in the order.
+    await record(result, of: request, in: dialog, target: place, latency: latency)
     await coordinator.endNavigation(target.id, reading: arrival)
 
     // Whatever the user asks for is theirs, and what Jilpa would have done by itself afterwards
@@ -275,6 +298,19 @@ public final class PanelPresenter: PanelActions {
     guard shown?.id == target.id else { return }
     shown?.isEnabled = true
     host.update(contents(enabled: true, notice: self.notice(for: result)))
+  }
+
+  /// One `nav_attempt` row for a move the Navigator answered. An app nobody can name records
+  /// nothing: the gate cannot check an exclusion without one, so it would refuse the row anyway.
+  private func record(
+    _ result: NavigationResult, of request: NavigationRequest, in dialog: ObservedDialog,
+    target: LocationRef?, latency: Duration
+  ) async {
+    guard let recorder, let app = dialog.app.app else { return }
+    await recorder.record(
+      result, in: dialog.id, app: app, trigger: request.trigger.kind,
+      strategy: dialog.session.descriptor.strategy?.rawValue, target: target, latency: latency,
+      dialog.policy.context)
   }
 
   // MARK: - Contents and placement

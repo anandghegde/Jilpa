@@ -8,6 +8,7 @@ public struct ActivityExport: Codable, Sendable, Equatable {
   /// The tables this export covers. A test holds this list against the schema.
   static let coveredTables: Set<String> = [
     "location", "location_ancestor", "dialog_session", "dest_stat", "shadow_rank",
+    "nav_attempt",
   ]
 
   public struct Place: Codable, Sendable, Equatable {
@@ -121,6 +122,40 @@ public struct ActivityExport: Codable, Sendable, Equatable {
     }
   }
 
+  /// One navigation Jilpa tried in one dialog: what asked for it, where it was meant to go,
+  /// how it ended, and whether the user moved somewhere else afterwards. These are the rows
+  /// behind the reliability counters, so the export shows what those counters were built from.
+  public struct Attempt: Codable, Sendable, Equatable {
+    public var session: String
+    public var seq: Int
+    public var at: Date
+    public var app: String
+    public var trigger: String
+    public var strategy: String?
+    public var target: Place?
+    public var result: String
+    public var reason: String?
+    public var latencyMS: Int?
+    public var corrected: Bool
+    /// Named, not a bit field: a number would mean nothing to someone reading the file.
+    public var safety: [String]
+
+    init(_ attempt: NavigationAttemptRecord) {
+      session = attempt.session.rawValue
+      seq = attempt.seq
+      at = attempt.at
+      app = attempt.app.bundleIdentifier
+      trigger = attempt.trigger.storedValue
+      strategy = attempt.strategy
+      target = attempt.target.map(Place.init)
+      result = attempt.result.rawValue
+      reason = attempt.reason
+      latencyMS = Stored.milliseconds(attempt.latency)
+      corrected = attempt.corrected
+      safety = attempt.safety.names
+    }
+  }
+
   public struct Configured: Codable, Sendable, Equatable {
     public var location: Place
     public var bookmark: Data?
@@ -138,6 +173,7 @@ public struct ActivityExport: Codable, Sendable, Equatable {
     public var destinations: Int
     public var configured: Int
     public var rankings: Int
+    public var attempts: Int
   }
 
   public var schemaVersion: Int
@@ -146,6 +182,7 @@ public struct ActivityExport: Codable, Sendable, Equatable {
   public var destinations: [Destination]
   public var configured: [Configured]
   public var rankings: [Ranking]
+  public var attempts: [Attempt]
   public var withheld: Withheld
 
   public func json() throws -> Data {

@@ -203,7 +203,8 @@ let package = Package(
     .testTarget(
       name: "JilpaAppTests",
       dependencies: [
-        "JilpaApp", "JilpaCore", "JilpaAX", "JilpaCompat", "JilpaDialog", "JilpaSensors",
+        "JilpaApp", "JilpaCore", "JilpaAX", "JilpaCompat", "JilpaDialog", "JilpaNavigator",
+        "JilpaSensors", "JilpaStore",
       ],
       swiftSettings: settings
     ),

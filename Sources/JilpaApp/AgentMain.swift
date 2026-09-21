@@ -13,6 +13,7 @@ import JilpaCompat
 import JilpaCore
 import JilpaDialog
 import JilpaNavigator
+import JilpaStore
 import JilpaUI
 
 @MainActor
@@ -71,6 +72,7 @@ final class DialogAgent {
   private let watcher: DialogWatcher
   private let coordinator: DialogCoordinator
   private let presenter: PanelPresenter
+  private let store: ActivityStore?
   private var tasks: [Task<Void, Never>] = []
 
   init() {
@@ -83,12 +85,27 @@ final class DialogAgent {
       services: .live(
         pool: pool, compat: { compat.answer($0, $1) }, policy: policy.sessionPolicy))
     let latch = self.latch
+    let store = Self.activityStore()
+    self.store = store
     presenter = PanelPresenter(
       coordinator: coordinator,
       navigator: Navigator(
         source: pool, reader: DialogReader(source: pool),
         userActive: { latch.isActive($0) }),
-      latch: latch, pool: pool, host: host, destination: Self.walkingSkeletonDestination)
+      latch: latch, pool: pool, host: host, destination: Self.walkingSkeletonDestination,
+      recorder: store.map { NavigationRecorder.live($0) })
+  }
+
+  /// The activity store, or nothing.
+  ///
+  /// A store that will not open is not a reason for the agent not to run: nothing on the path
+  /// that watches, draws or navigates reads it, and what is lost is counters. The health view
+  /// says so (WP7).
+  private static func activityStore() -> ActivityStore? {
+    let base =
+      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.temporaryDirectory
+    return try? ActivityStore(at: ActivityStore.defaultURL(applicationSupport: base))
   }
 
   /// The one folder the walking skeleton's one button goes to (WP2). Favorites, recents, rules,
@@ -111,6 +128,13 @@ final class DialogAgent {
     tasks = [
       Task { [apps] in for await event in apps.events { await watcher.handle(event) } },
       Task { [watcher, coordinator] in await coordinator.run(watcher.events) },
+      // Retention is the store's own promise to the user, and nothing else keeps it: once per
+      // launch, before anything is written, whatever is older than the window goes.
+      Task { [store] in
+        guard let store else { return }
+        _ = try? await store.purge(
+          olderThan: Date().addingTimeInterval(-ActivityStore.defaultRetention))
+      },
     ]
     presenter.start()
     apps.start()

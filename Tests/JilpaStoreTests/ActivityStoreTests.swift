@@ -49,6 +49,17 @@ func session(
     closedAt: date.addingTimeInterval(4), outcome: outcome, confirmedLocation: location, source: source)
 }
 
+func attempt(
+  _ session: String, seq: Int = 1, app: AppID = editor, at date: Date = t0,
+  trigger: NavigationTriggerKind = .manual(.panelButton), to target: LocationRef? = nil,
+  result: NavigationOutcomeKind = .arrived, corrected: Bool = false, safety: SafetyFlags = []
+) -> NavigationAttemptRecord {
+  NavigationAttemptRecord(
+    session: SessionID(rawValue: session), seq: seq, at: date, app: app, trigger: trigger,
+    strategy: "GoToFolder.v26", target: target, result: result,
+    latency: .milliseconds(120), corrected: corrected, safety: safety)
+}
+
 /// The ranker's answer for a dialog: the places in order, best first.
 func ranking(_ session: String, app: AppID = editor, _ places: [LocationRef]) -> ShadowRanking {
   ShadowRanking(
@@ -229,7 +240,7 @@ struct ActivityStoreTests {
 
     let export = try await store.export(at: t0, for: .ui, domain)
     #expect(export.sessions.count == 2)
-    #expect(export.withheld == ActivityExport.Withheld(sessions: 2, destinations: 1, configured: 0, rankings: 0))
+    #expect(export.withheld == ActivityExport.Withheld(sessions: 2, destinations: 1, configured: 0, rankings: 0, attempts: 0))
   }
 
   @Test("in private mode a read shows what the user configured and nothing learned")
@@ -251,7 +262,7 @@ struct ActivityStoreTests {
     }
     let export = try await store.export(at: t0, for: .cli, privately)
     #expect(export.sessions.isEmpty && export.destinations.isEmpty)
-    #expect(export.withheld == ActivityExport.Withheld(sessions: 1, destinations: 1, configured: 0, rankings: 0))
+    #expect(export.withheld == ActivityExport.Withheld(sessions: 1, destinations: 1, configured: 0, rankings: 0, attempts: 0))
     #expect(export.configured.map(\.location.path) == ["/favorites/docs"])
   }
 
@@ -337,12 +348,11 @@ struct ActivityStoreTests {
     try await store.recordUse(cleared(DestinationUse(location: place("/work/a"), key: key, at: t0)))
     try await store.keepIdentity(
       cleared(ConfiguredLocation(location: place("/favorites/docs", file: 7)), for: .keepConfiguredIdentity))
+    try await store.record(cleared(attempt("old", at: old, to: place("/work/a")), for: .reliabilityCounters))
+    try await store.record(cleared(attempt("new", at: t0, to: place("/work/a")), for: .reliabilityCounters))
     try scratch.raw { db in
       try db.execute(
         sql: "UPDATE dest_stat SET pinned = 1 WHERE location_id = (SELECT id FROM location WHERE path = '/old/pinned')")
-      try db.execute(
-        sql: "INSERT INTO nav_attempt (session_id, seq, at, result) VALUES ('old', 1, ?, 'arrived'), ('new', 1, ?, 'arrived')",
-        arguments: [old.timeIntervalSince1970, t0.timeIntervalSince1970])
     }
 
     let counts = try await store.purge(olderThan: t0.addingTimeInterval(-ActivityStore.defaultRetention))

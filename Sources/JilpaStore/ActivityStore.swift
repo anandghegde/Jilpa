@@ -155,6 +155,34 @@ public final class ActivityStore: Sendable {
     }
   }
 
+  /// Writes one navigation attempt, or writes it again.
+  ///
+  /// An attempt is named by its dialog and its number, so a second write of the same pair
+  /// replaces the row: that is how a correction found later is recorded, and it is why the
+  /// writer is safe to call again after a retry. The row carries its own app, because it is
+  /// written while the dialog is still open and its session row may never be written at all.
+  public func record(_ attempt: Cleared<NavigationAttemptRecord>) async throws(StoreError) {
+    try Self.expect(attempt, .reliabilityCounters)
+    let attempt = attempt.value
+    try await write { db in
+      let target = try attempt.target.map { try Self.upsert($0, db) }
+      let columns = Stored.attemptColumns
+      try db.execute(
+        sql: """
+          INSERT INTO nav_attempt (\(columns.joined(separator: ", ")))
+          VALUES (\(columns.map { _ in "?" }.joined(separator: ", ")))
+          ON CONFLICT(session_id, seq) DO UPDATE SET
+            \(columns.dropFirst(2).map { "\($0) = excluded.\($0)" }.joined(separator: ", "))
+          """,
+        arguments: [
+          attempt.session.rawValue, attempt.seq, attempt.at.timeIntervalSince1970,
+          attempt.app.bundleIdentifier, attempt.trigger.storedValue, attempt.strategy, target,
+          attempt.result.rawValue, attempt.reason, Stored.milliseconds(attempt.latency),
+          attempt.corrected, attempt.safety.rawValue,
+        ])
+    }
+  }
+
   /// The configuration changed: folders no longer in it stop being kept. Their rows lose the
   /// bookmark now and go with the next purge unless activity still names them. Removing data
   /// needs no clearance.
@@ -231,32 +259,45 @@ public final class ActivityStore: Sendable {
     return gate.filter(rows, for: client, context)
   }
 
+  /// Navigation attempts, newest first: the rows behind the reliability counters and the
+  /// correction rate. An attempt whose target the store no longer holds still reads; one whose
+  /// trigger or result this version cannot make out does not.
+  public func navigationAttempts(
+    session: SessionID? = nil, since: Date? = nil, for client: ClientKind, _ context: GateContext
+  ) async throws(StoreError) -> [NavigationAttemptRecord] {
+    let rows = try await read { db in try Self.attempts(session: session, since: since, db) }
+    return gate.filter(rows, for: client, context)
+  }
+
   /// Everything the store holds that the client may see now, and a count of what it may not,
   /// so a filtered row is never dropped without a trace.
   public func export(
     at date: Date = Date(), for client: ClientKind, _ context: GateContext
   ) async throws(StoreError) -> ActivityExport {
-    let (sessions, stats, configured, rankings) = try await read { db in
+    let (sessions, stats, configured, rankings, attempts) = try await read { db in
       (
         try Self.sessions(since: nil, db), try Self.stats(app: nil, db), try Self.configured(db),
-        try Self.rankings(since: nil, db)
+        try Self.rankings(since: nil, db), try Self.attempts(session: nil, since: nil, db)
       )
     }
     let visibleRankings = visible(rankings, of: sessions, for: client, context)
     let visibleSessions = gate.filter(sessions, for: client, context)
     let visibleStats = gate.filter(stats, for: client, context)
     let visibleConfigured = gate.filter(configured, for: client, context)
+    let visibleAttempts = gate.filter(attempts, for: client, context)
     return ActivityExport(
       schemaVersion: Schema.version, exportedAt: date,
       sessions: visibleSessions.map(ActivityExport.Session.init),
       destinations: visibleStats.map(ActivityExport.Destination.init),
       configured: visibleConfigured.map(ActivityExport.Configured.init),
       rankings: visibleRankings.map(ActivityExport.Ranking.init),
+      attempts: visibleAttempts.map(ActivityExport.Attempt.init),
       withheld: ActivityExport.Withheld(
         sessions: sessions.count - visibleSessions.count,
         destinations: stats.count - visibleStats.count,
         configured: configured.count - visibleConfigured.count,
-        rankings: rankings.count - visibleRankings.count))
+        rankings: rankings.count - visibleRankings.count,
+        attempts: attempts.count - visibleAttempts.count))
   }
 
   /// Rows per table. Counts only, so it needs no gate; the health view and the tests use it.
@@ -454,6 +495,23 @@ public final class ActivityStore: Sendable {
       guard let app = apps[session], let entries = entries[session] else { return nil }
       return ShadowRanking(session: SessionID(rawValue: session), app: AppID(app), entries: entries)
     }
+  }
+
+  /// Newest first, and by `seq` within one dialog, so a dialog's attempts read in the order
+  /// they were made however the rows were written.
+  private static func attempts(
+    session: SessionID?, since: Date?, _ db: Database
+  ) throws -> [NavigationAttemptRecord] {
+    let floor = since?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude
+    let locations = try locations(
+      db, where: "id IN (SELECT target_location FROM nav_attempt WHERE target_location IS NOT NULL)")
+    let condition = session == nil ? "1" : "session_id = ?"
+    let values: [String] = session.map { [$0.rawValue] } ?? []
+    return try Row.fetchAll(
+      db,
+      sql: "SELECT * FROM nav_attempt WHERE at >= ? AND \(condition) ORDER BY at DESC, session_id, seq",
+      arguments: StatementArguments([floor] + values)
+    ).compactMap { Stored.attempt($0, locations) }
   }
 
   private static func stats(app: AppID?, _ db: Database) throws -> [DestinationStat] {
