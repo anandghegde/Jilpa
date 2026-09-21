@@ -1,0 +1,11 @@
+.DS_Store
+/.build
+/.swiftpm
+/dist
+/DerivedData
+*.xcodeproj/xcuserdata
+*.xcworkspace/xcuserdata
+xcuserdata/
+
+# Spike raw data can hold paths from the author's Mac. Write-ups go in docs/spikes/.
+/Tools/spikes/**/data/

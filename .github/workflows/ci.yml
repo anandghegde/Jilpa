@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Hosted runner: layering lint and unit tests only. Nothing here needs an Accessibility grant.
+  # AX component tests, soak and performance runs belong to the self-hosted Mac (WP4).
+  unit:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Layering and contract lint
+        run: Scripts/lint-imports.sh
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
