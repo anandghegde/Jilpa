@@ -15,11 +15,15 @@ import JilpaUI
 /// `beginNavigation` before anything is sent and closed with `endNavigation` after: a reading
 /// taken in the middle is then the move's own doing and not the user's.
 ///
-/// What WP5 adds: the zones and their content, docking preferences, live move and resize
-/// tracking, hiding when the host is not frontmost or the dialog is on another Space, and the
-/// recovery notice. What WP4 adds: `NavigationHistory` per dialog, which this is the owner of —
-/// the Navigator deliberately keeps none. What WP6 adds: the destinations themselves. Here there
-/// is one, and it is the same one for every dialog.
+/// It owns one `NavigationHistory` per dialog (WP4) — the Navigator deliberately keeps none —
+/// and feeds it both from verified arrivals and from folder changes the reader observed, so Back
+/// follows the user's own navigations as well as Jilpa's.
+///
+/// What WP5 adds: the zones and their content, the buttons and hotkeys for Back, Forward and
+/// Return to original folder, docking preferences, live move and resize tracking, hiding when
+/// the host is not frontmost or the dialog is on another Space, and the recovery notice. What
+/// WP6 adds: the destinations themselves. Here there is one, and it is the same one for every
+/// dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -27,11 +31,25 @@ public final class PanelPresenter: PanelActions {
   private let latch: ActivityLatchMirror
   private let pool: AXSessionPool
   private let host: PanelHost
+  private let places: LocationEdge
   private var destination: URL
 
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
   private var pump: Task<Void, Never>?
+
+  /// One trail per dialog the coordinator has announced, not only the one under the strip: a
+  /// dialog that loses the strip to a frontmost app and gets it back keeps where it has been.
+  /// A trail ends with its dialog.
+  private var trails: [DialogSession.ID: Trail] = [:]
+
+  /// Where one dialog has been, and the folder path the reader last handed back for it. The
+  /// second is only a filter: a reading that names the folder the same way as the one before it
+  /// is not a navigation and costs no file system reads.
+  private struct Trail {
+    var history: NavigationHistory
+    var lastSeen: String?
+  }
 
   private struct Shown {
     var id: DialogSession.ID
@@ -45,13 +63,14 @@ public final class PanelPresenter: PanelActions {
 
   public init(
     coordinator: DialogCoordinator, navigator: any Navigating, latch: ActivityLatchMirror,
-    pool: AXSessionPool, host: PanelHost, destination: URL
+    pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live
   ) {
     self.coordinator = coordinator
     self.navigator = navigator
     self.latch = latch
     self.pool = pool
     self.host = host
+    self.places = places
     self.destination = destination
     host.actions = self
   }
@@ -72,6 +91,7 @@ public final class PanelPresenter: PanelActions {
     pump = nil
     host.hide()
     shown = nil
+    trails.removeAll()
   }
 
   // MARK: - The stream
@@ -90,6 +110,9 @@ public final class PanelPresenter: PanelActions {
 
     case .updated(let dialog):
       latch.observe(dialog)
+      // Every announced dialog, not only the one under the strip: a folder the user reached by
+      // themselves belongs in the history whether or not the panel was watching.
+      await noteFolder(dialog)
       guard shown?.id == dialog.id else { return }
       shown?.descriptor = dialog.session.descriptor
       shown?.isEnabled = dialog.session.allowsManualNavigation
@@ -104,10 +127,12 @@ public final class PanelPresenter: PanelActions {
     case .gone(let id):
       if shown?.id == id { dismiss(id) }
       latch.forget(id)
+      trails[id] = nil
 
     case .closed(let dialog), .ended(let dialog):
       if shown?.id == dialog.id { dismiss(dialog.id) }
       latch.forget(dialog.id)
+      trails[dialog.id] = nil
     }
   }
 
@@ -123,17 +148,77 @@ public final class PanelPresenter: PanelActions {
     // press before it still running.
     pending = nil
     guard let shown else { return }
-    pending = Task { await self.move(shown) }
+    pending = Task { await self.move(shown, to: self.destination, trigger: .manual(.panelButton)) }
   }
 
   /// The move the last press started. It is here so the soak can wait for one; the app never
   /// waits, because the press returns to the run loop and the strip updates when the move ends.
   public private(set) var pending: Task<Void, Never>?
 
-  /// What the last move came to. WP4 replaces it with the `NavigationHistory` this presenter
-  /// owns — one per dialog, which is where Return to original folder and the retraction window
-  /// read from. Here there is one move's worth, and it is what the soak judges a press by.
+  /// What the last move came to. The history is where Return to original folder reads from;
+  /// this is the one result a caller can judge a single press by, which is what the soak does.
   public private(set) var lastResult: NavigationResult?
+
+  /// The folder a move in flight is going to, so the notice names that one and not the button's.
+  private var moving: URL?
+
+  // MARK: - The history
+
+  /// Where one dialog has been. Nil until the reader has named a folder for it.
+  public func history(of id: DialogSession.ID) -> NavigationHistory? { trails[id]?.history }
+
+  /// Where the dialog under the strip has been.
+  public var history: NavigationHistory? { shown.flatMap { trails[$0.id]?.history } }
+
+  /// Whether Back, Forward or Return to original folder has anywhere to go in the dialog under
+  /// the strip. WP5 draws the three controls from this.
+  public func canMove(_ move: HistoryMove) -> Bool { history?.can(move) ?? false }
+
+  /// Back, Forward or Return to original folder.
+  ///
+  /// The history only names targets: going there is the same request to the Navigator as any
+  /// other, with the same safety checks, and the history moves its cursor when that request
+  /// comes back verified — never before, and never if it does not arrive.
+  public func moveInHistory(_ move: HistoryMove) {
+    pending = nil
+    guard let shown, let target = trails[shown.id]?.history.target(of: move) else { return }
+    let url = URL(fileURLWithPath: target.path, isDirectory: true)
+    pending = Task { await self.move(shown, to: url, trigger: .history(move), as: move) }
+  }
+
+  /// The place at a URL, read off the main actor: a `stat` on a network mount can block for as
+  /// long as the mount takes to answer, and nothing on the path that draws the panel may.
+  private func locate(_ url: URL) async -> LocationRef? {
+    let places = places
+    return await Task.detached(priority: .userInitiated) { places.location(of: url) }.value
+  }
+
+  /// The history's side of one announced dialog: the folder it opened in, and every folder it
+  /// has been in since, including the ones the user reached with the dialog's own controls.
+  private func noteFolder(_ dialog: ObservedDialog) async {
+    let session = dialog.session
+    let seen = session.snapshot?.folder.value
+    let known = trails[dialog.id] != nil
+    // Before the first reading there is no folder to name and nothing to return to.
+    guard known || seen != nil || session.originalFolder.isKnown else { return }
+    // The reader names one folder the same way every time, so an unchanged string is not a
+    // navigation. Identity decides only once the string has moved.
+    if known, seen?.path == trails[dialog.id]?.lastSeen { return }
+
+    var original: LocationRef?
+    if !known, let url = session.originalFolder.value { original = await locate(url) }
+    var arrived: LocationRef?
+    if let seen { arrived = await locate(seen) }
+
+    // Read again, after the waits above: a move that ended in the middle of them has already
+    // recorded its own arrival, and a copy taken before it must not overwrite that.
+    var trail = trails[dialog.id] ?? Trail(history: NavigationHistory(original: original))
+    if let seen, let arrived {
+      trail.history.arrived(at: arrived)
+      trail.lastSeen = seen.path
+    }
+    trails[dialog.id] = trail
+  }
 
   /// Points the strip's one button at another folder. WP6 replaces this outright: the panel
   /// will show the ranked set and the press will carry which of them was pressed. The notice
@@ -144,27 +229,42 @@ public final class PanelPresenter: PanelActions {
     host.update(contents(enabled: shown.isEnabled, notice: nil))
   }
 
-  private func move(_ target: Shown) async {
+  private func move(
+    _ target: Shown, to folder: URL, trigger: NavigationTrigger, as step: HistoryMove? = nil
+  ) async {
     lastResult = nil
     guard let dialog = await coordinator.dialog(target.id),
       dialog.session.allowsManualNavigation
     else { return }
     let request = NavigationRequest(
       session: target.id, dialog: target.window, descriptor: dialog.session.descriptor,
-      target: destination, trigger: .manual(.panelButton))
+      target: folder, trigger: trigger)
 
     // Announced first: the folder, the selection and the focus a Go to Folder move changes are
     // then the move's, and the coordinator does not read them as the user's.
     guard await coordinator.beginNavigation(target.id, expecting: DialogSession.expectable) == nil
     else { return }
+    moving = folder
     latch.beginMove(target.id)
     let result = await navigator.navigate(request)
     latch.endMove(target.id)
+    moving = nil
     lastResult = result
     // An arrival is the one reading the Navigator stands behind, so it becomes the session's
     // new baseline. Anything else hands back nothing and the coordinator reads again.
     var arrival: DialogSnapshot?
-    if case .arrived(let verified) = result { arrival = verified.reading }
+    if case .arrived(let verified) = result {
+      arrival = verified.reading
+      // Before `endNavigation`, so the reading it announces finds the history already there and
+      // reads as the same folder rather than as a navigation of its own. A move that did not
+      // arrive moves nothing: the dialog is wherever it was, which the history already says.
+      if let place = await locate(verified.folder) {
+        var trail = trails[target.id] ?? Trail(history: NavigationHistory(original: nil))
+        trail.history.arrived(at: place, by: step)
+        trail.lastSeen = verified.folder.path
+        trails[target.id] = trail
+      }
+    }
     await coordinator.endNavigation(target.id, reading: arrival)
 
     // Whatever the user asks for is theirs, and what Jilpa would have done by itself afterwards
@@ -189,7 +289,8 @@ public final class PanelPresenter: PanelActions {
     guard !session.allowsManualNavigation else { return nil }
     switch session.phase {
     case .recognized: return nil
-    case .navigating: return String(localized: "Going to \(destination.lastPathComponent)…")
+    case .navigating:
+      return String(localized: "Going to \((moving ?? destination).lastPathComponent)…")
     case .closed, .ended: return nil
     case .ready:
       return session.isStale

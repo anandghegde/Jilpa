@@ -180,3 +180,22 @@ public enum LocationCheck {
     return .unknown(seen.lookup == .notAsked ? "lookup-not-asked" : "lookup-failed")
   }
 }
+
+/// The privacy gate's folder tokens are minted here, from what the file system said about one
+/// item. The edge that touches the file system calls this; Core owns the format so it has one
+/// home and one test, and so two modules can never disagree about what a token is.
+extension FolderKey {
+  /// The token for the item a sighting is of.
+  ///
+  /// On a volume with persistent identifiers the number outlives every rename and move, so an
+  /// exclusion keeps covering the folder wherever it goes. Without them the number is handed to
+  /// the next item made once this one is gone, so it would point an exclusion at a stranger;
+  /// there the path on that volume is the truest name available, which is what a destination on
+  /// such a volume is anyway. The prefixes keep the two vocabularies from comparing equal.
+  public static func of(_ sighting: LocationSighting) -> FolderKey {
+    let identity = sighting.identity
+    return identity.persistentIDs
+      ? FolderKey("id1:\(identity.volumeUUID):\(identity.fileID)")
+      : FolderKey("path1:\(identity.volumeUUID):\(sighting.path)")
+  }
+}

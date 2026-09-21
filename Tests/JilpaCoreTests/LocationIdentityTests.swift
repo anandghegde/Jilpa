@@ -207,3 +207,41 @@ struct LocationIdentityTests {
     #expect(!onStick.proves(onStick))
   }
 }
+
+@Suite("Folder keys")
+struct FolderKeyMintingTests {
+  private func sighting(_ path: String, _ identity: LocationIdentity) -> LocationSighting {
+    LocationSighting(path: path, identity: identity)
+  }
+
+  @Test("a volume with persistent identifiers keys by identity, so a rename keeps the exclusion")
+  func byIdentity() {
+    let before = FolderKey.of(sighting("/Volumes/Work/Invoices", original))
+    let renamed = FolderKey.of(sighting("/Volumes/Work/Bills", original))
+    #expect(before == renamed)
+    #expect(before != FolderKey.of(sighting("/Volumes/Work/Invoices", newcomer)))
+    #expect(before != FolderKey.of(sighting("/Volumes/Work/Invoices", onBoot)))
+  }
+
+  @Test("without persistent identifiers the path keys it, because the number is handed on")
+  func byPath() {
+    let recycled = LocationIdentity(volumeUUID: stick, fileID: 41, persistentIDs: false)
+    let key = FolderKey.of(sighting("/Volumes/Stick/Photos", onStick))
+    #expect(key == FolderKey.of(sighting("/Volumes/Stick/Photos", recycled)))
+    // The same number on the same volume, another folder. Keying by it would exclude a stranger.
+    #expect(key != FolderKey.of(sighting("/Volumes/Stick/Scans", recycled)))
+  }
+
+  @Test("the two vocabularies never collide")
+  func distinctVocabularies() {
+    let stable = LocationIdentity(volumeUUID: work, fileID: 407, persistentIDs: true)
+    let unstable = LocationIdentity(volumeUUID: work, fileID: 407, persistentIDs: false)
+    #expect(FolderKey.of(sighting(named, stable)) != FolderKey.of(sighting(named, unstable)))
+  }
+
+  @Test("the same folder seen twice mints the same token")
+  func stable() {
+    #expect(FolderKey.of(sighting(named, original)) == FolderKey.of(sighting(named, original)))
+    #expect(FolderKey.of(sighting(named, onStick)) == FolderKey.of(sighting(named, onStick)))
+  }
+}
