@@ -59,6 +59,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     statusItem.setFavorites(config.favorites)
     statusItem.onChooseFavorite = { [weak self] place in self?.chose(place) }
     statusItem.onChooseRecent = { [weak self] place in self?.chose(place) }
+    statusItem.onTogglePin = { [weak self] place in self?.togglePin(place) }
     // The recents are taken as the menu opens, not held between openings: the gate is asked
     // again each time, because private mode may have moved since the last one (S1, contract 7).
     statusItem.onMenuOpen = { [weak self] in
@@ -100,6 +101,13 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   private func chose(_ place: RecentPlace) {
     guard agent?.goToRecent(place.path) != true else { return }
     NSWorkspace.shared.open(URL(fileURLWithPath: place.path, isDirectory: true))
+  }
+
+  /// Option-clicking a recent pins it or takes the pin back (D5). It sends nothing to any
+  /// dialog, so it is safe whatever is on screen, and the menu redraws from the read that
+  /// follows rather than from the click.
+  private func togglePin(_ place: RecentPlace) {
+    agent?.setPinned(!place.pinned, at: place.path)
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -150,6 +158,9 @@ final class DialogAgent {
     let latch = self.latch
     let store = Self.activityStore()
     self.store = store
+    // One recorder for both of D5's writes, the counter a confirmed dialog steps and the pin a
+    // menu sets, so there is one place that mints a `Cleared` for the recents.
+    let uses = store.map { UseRecorder.live($0) }
     presenter = PanelPresenter(
       coordinator: coordinator,
       navigator: Navigator(
@@ -157,11 +168,12 @@ final class DialogAgent {
         userActive: { latch.isActive($0) }),
       latch: latch, pool: pool, host: host, destination: Self.walkingSkeletonDestination,
       recorder: store.map { NavigationRecorder.live($0) },
-      uses: store.map { UseRecorder.live($0) })
+      uses: uses)
 
     // The recents come from the same counters the ranker will read in WP7: one record of what
-    // was used, and no surface with a list of its own.
-    recents = store.map { RecentsCenter.live($0) }
+    // was used, and no surface with a list of its own. The recorder is shared with the
+    // presenter, so the counter a dialog steps and the pin a menu sets go through one gate.
+    recents = store.flatMap { store in uses.map { RecentsCenter.live(store, uses: $0) } }
     presenter.recentsSource = recents
     recents?.onChange { [weak self] in self?.onRecentsChange?() }
 
@@ -210,6 +222,12 @@ final class DialogAgent {
 
   /// The same for a recent (D5).
   func goToRecent(_ path: String) -> Bool { presenter.goToRecent(path) }
+
+  /// A place pinned or unpinned from the menu bar (D5). Asked with the same policy the list
+  /// was drawn under, so what the user could see is what they can pin.
+  func setPinned(_ pinned: Bool, at path: String) {
+    recents?.setPinned(pinned, at: path, policy: policy.menuPolicy)
+  }
 
   /// What the menu bar offers now: the global list, gated as a menu about no dialog is.
   func menuRecents() -> [RecentPlace] {

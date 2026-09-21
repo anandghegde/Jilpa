@@ -35,10 +35,29 @@ private func policy(_ state: PrivacyState = PrivacyState(), app: AppID? = editor
 private actor Counters {
   private var rows: [DestinationStat]
   private(set) var reads: [PrivacyState] = []
+  private(set) var pins: [DestinationPin] = []
+  /// What the recorder would have said: false is a refusal or a place with no counter left.
+  var moves = true
 
   init(_ rows: [DestinationStat]) { self.rows = rows }
 
   func set(_ rows: [DestinationStat]) { self.rows = rows }
+
+  func moving(_ on: Bool) { moves = on }
+
+  /// Stands in for the recorder, which has its own tests: what matters here is which place the
+  /// centre named and what it did with the answer.
+  func pin(_ pin: DestinationPin, _ context: GateContext) -> Bool {
+    pins.append(pin)
+    guard moves else { return false }
+    rows = rows.map { row in
+      guard row.location.path == pin.location.path else { return row }
+      var row = row
+      row.pinned = pin.pinned
+      return row
+    }
+    return true
+  }
 
   func read(_ context: GateContext) -> [DestinationStat] {
     reads.append(context.state)
@@ -55,7 +74,8 @@ private actor Counters {
 @Suite("Recents centre")
 struct RecentsCenterTests {
   private func centre(_ counters: Counters) -> RecentsCenter {
-    RecentsCenter(read: { await counters.read($0) }, now: { now })
+    RecentsCenter(
+      read: { await counters.read($0) }, pin: { await counters.pin($0, $1) }, now: { now })
   }
 
   /// Nothing is read until something asks, so a Jilpa that has just launched has touched no
@@ -163,6 +183,74 @@ struct RecentsCenterTests {
     await held.release()
     await centre.settle()
     #expect(await counters.reads.map(\.privateMode) == [false, true])
+  }
+
+  // MARK: - Pins
+
+  /// The menu hands back a path; what reaches the gate is the whole location, lineage and all,
+  /// which is the one thing the surfaces are not given. The order changes with the pin, so the
+  /// write is followed by a read and every surface is told.
+  @Test func pinningNamesTheWholePlaceAndReadsAgain() async {
+    let counters = Counters([stat("/u/invoices", uses: 9), stat("/u/scans", uses: 1)])
+    let centre = centre(counters)
+    var changes = 0
+    centre.onChange { changes += 1 }
+    centre.refresh(PrivacyState())
+    await centre.settle()
+    #expect(centre.recents(.everywhere, on: .menu, policy: policy(), limit: 8).map(\.name)
+      == ["invoices", "scans"])
+
+    centre.setPinned(true, at: "/u/scans", policy: policy())
+    await centre.settle()
+    #expect(await counters.pins.map(\.location.path) == ["/u/scans"])
+    #expect(await counters.pins.first?.location.lineage == place("/u/scans").lineage)
+    #expect(await counters.pins.map(\.pinned) == [true])
+    #expect(centre.recents(.everywhere, on: .menu, policy: policy(), limit: 8).map(\.name)
+      == ["scans", "invoices"])
+    #expect(changes == 2)
+  }
+
+  /// And back again, so the toggle is the caller's and not a state the centre keeps.
+  @Test func unpinningIsTheSameActInReverse() async {
+    let counters = Counters([stat("/u/scans", uses: 1, daysAgo: 90, pinned: true)])
+    let centre = centre(counters)
+    centre.refresh(PrivacyState())
+    await centre.settle()
+    #expect(centre.recents(.everywhere, on: .menu, policy: policy(), limit: 8).map(\.pinned)
+      == [true])
+
+    centre.setPinned(false, at: "/u/scans", policy: policy())
+    await centre.settle()
+    #expect(await counters.pins.map(\.pinned) == [false])
+    #expect(centre.recents(.everywhere, on: .menu, policy: policy(), limit: 8).map(\.pinned)
+      == [false])
+  }
+
+  /// A path no counter names any more reaches nothing: the centre has no lineage for it, so
+  /// there is no record it could clear, and a pin is not worth a notice.
+  @Test func aPathTheCountersNoLongerHoldPinsNothing() async {
+    let counters = Counters([stat("/u/invoices", uses: 1)])
+    let centre = centre(counters)
+    centre.refresh(PrivacyState())
+    await centre.settle()
+    centre.setPinned(true, at: "/u/gone", policy: policy())
+    await centre.settle()
+    #expect(await counters.pins.isEmpty)
+    #expect(await counters.reads.count == 1)
+  }
+
+  /// A write that did not happen is not a reason to read again. The refusal is the recorder's
+  /// and the gate's; what this must not do is redraw as though something moved.
+  @Test func aPinThatMovedNothingReadsNothingAgain() async {
+    let counters = Counters([stat("/u/invoices", uses: 1)])
+    let centre = centre(counters)
+    centre.refresh(PrivacyState())
+    await centre.settle()
+    await counters.moving(false)
+    centre.setPinned(true, at: "/u/invoices", policy: policy())
+    await centre.settle()
+    #expect(await counters.pins.count == 1)
+    #expect(await counters.reads.count == 1)
   }
 }
 

@@ -218,6 +218,35 @@ public struct DestinationStat: Sendable, Hashable, Excludable {
   }
 }
 
+/// A recent folder pinned or unpinned by the user (D5).
+///
+/// A pin is about the place and not about one counter: a place is one entry in a list however
+/// many apps, purposes and file types used it, so pinning it in one list pins it in all of
+/// them, and unpinning is the same act in reverse. That is what keeps the read model, which
+/// calls a place pinned when any counter in scope is, from disagreeing with what the user did.
+///
+/// It is the user's own act, but the row it marks is not: the counter exists only because
+/// activity was learned, and calling this explicit would be a way to keep a derived row alive
+/// in private mode. So the subject is derived like the counter it belongs to, and it is the
+/// operation — `pinRecent`, refused in private mode — that carries what is different about it.
+///
+/// It names no app for the same reason: the pin is on the folder, and the counters under it may
+/// belong to several apps. The folder's own exclusions still apply, which is why the lineage is
+/// here and not just a path.
+public struct DestinationPin: Sendable, Hashable, Excludable {
+  public var location: LocationRef
+  public var pinned: Bool
+
+  public init(location: LocationRef, pinned: Bool) {
+    self.location = location
+    self.pinned = pinned
+  }
+
+  public var privacySubject: PrivacySubject {
+    PrivacySubject(exposure: .derived, folderLineage: location.lineage)
+  }
+}
+
 /// A folder the user configured by hand (a favorite, a default, a rule's destination) with the
 /// identity found for it, so a later rename can be offered as a repair. It is the user's own
 /// entry and no activity: it names no app, and private mode keeps it.

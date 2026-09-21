@@ -140,6 +140,32 @@ public final class ActivityStore: Sendable {
     }
   }
 
+  /// Pins or unpins a place, and says how many counters it moved (D5).
+  ///
+  /// The place is found by its canonical path and is never created: a pin is a mark on counters
+  /// that already exist, and a folder no confirmed dialog has been in has nothing to pin. Zero
+  /// back is that case, and it is not an error — the list the user pinned from may simply have
+  /// been read before a retention pass took the row away.
+  ///
+  /// Every counter for the place moves together, whichever app, purpose or file type it belongs
+  /// to, because a pin is about the folder. Retention keeps a pinned counter however old it is,
+  /// which is the whole of "pinned entries persist"; unpinning hands it back to the ordinary
+  /// rule, so a place unpinned long after its last use can be collected on the next pass.
+  @discardableResult
+  public func setPin(_ pin: Cleared<DestinationPin>) async throws(StoreError) -> Int {
+    try Self.expect(pin, .pinRecent)
+    let pin = pin.value
+    return try await write { db in
+      try db.execute(
+        sql: """
+          UPDATE dest_stat SET pinned = ?
+          WHERE location_id IN (SELECT id FROM location WHERE path = ?)
+          """,
+        arguments: [pin.pinned, pin.location.path])
+      return db.changesCount
+    }
+  }
+
   /// Keeps the identity found for a folder the user configured. A nil identity or bookmark
   /// leaves what is stored alone; a new one replaces it, which is the user naming the folder
   /// that is at the path now.

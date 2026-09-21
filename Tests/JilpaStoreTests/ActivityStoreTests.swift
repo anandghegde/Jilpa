@@ -30,6 +30,8 @@ let gate = PrivacyGate()
 let editor: AppID = "com.example.editor"
 let browser: AppID = "com.example.browser"
 let normal = GateContext(state: PrivacyState(), app: editor)
+/// A menu about no dialog and no app: what a pin from the menu bar is made under.
+let menu = GateContext(state: PrivacyState(), app: nil)
 let day: TimeInterval = 24 * 60 * 60
 let t0 = Date(timeIntervalSince1970: 1_790_000_000)
 
@@ -333,6 +335,61 @@ struct ActivityStoreTests {
     #expect(try await store.configuredLocations(for: .ui, normal).isEmpty)
   }
 
+  // MARK: - Pins
+
+  /// A pin is about the place, so it moves every counter under it however many apps, purposes
+  /// and file types made them — which is what keeps the read model, where a place is one entry,
+  /// agreeing with what the user did.
+  @Test("a pin marks every counter the place has, and unpinning takes them all back")
+  func pinIsAboutThePlace() async throws {
+    let scratch = try Scratch()
+    let store = scratch.store
+    let folder = place("/work/scans")
+    for key in [
+      DestinationKey(app: editor, purpose: .save), DestinationKey(app: editor, purpose: .export),
+      DestinationKey(app: browser, purpose: .save, extClass: "pdf"),
+    ] {
+      try await store.recordUse(cleared(DestinationUse(location: folder, key: key, at: t0)))
+    }
+    try await store.recordUse(
+      cleared(DestinationUse(location: place("/work/other"), key: DestinationKey(app: editor, purpose: .save), at: t0)))
+
+    let pinned = try await store.setPin(
+      cleared(DestinationPin(location: folder, pinned: true), for: .pinRecent, menu))
+    #expect(pinned == 3)
+    #expect(Set(try await store.destinationStats(for: .ui, normal).filter(\.pinned).map(\.location.path)) == ["/work/scans"])
+
+    let unpinned = try await store.setPin(
+      cleared(DestinationPin(location: folder, pinned: false), for: .pinRecent, menu))
+    #expect(unpinned == 3)
+    #expect(try await store.destinationStats(for: .ui, normal).allSatisfy { !$0.pinned })
+  }
+
+  /// A place no counter names has nothing to pin, and no row is made for it: a pin is a mark on
+  /// what activity already left, and a folder the user never confirmed a dialog in is a
+  /// favorite's job, not a recent's.
+  @Test("pinning a place with no counter changes nothing and creates nothing")
+  func pinningAnUnknownPlaceDoesNothing() async throws {
+    let scratch = try Scratch()
+    let store = scratch.store
+    let moved = try await store.setPin(
+      cleared(DestinationPin(location: place("/never/here"), pinned: true), for: .pinRecent, menu))
+    #expect(moved == 0)
+    #expect(try await store.rowCounts()["location"] == 0)
+  }
+
+  /// The clearance is the pin's own. A record cleared to be learnt is not one cleared to be
+  /// pinned: `pinRecent` is allowed where `learn` is not, so the two must not be interchangeable
+  /// at the writer.
+  @Test("a pin cleared for another write is refused")
+  func aPinNeedsItsOwnClearance() async throws {
+    let scratch = try Scratch()
+    let pin = try cleared(DestinationPin(location: place("/work/a"), pinned: true), for: .learn)
+    await #expect(throws: StoreError.clearedFor(.learn, expected: .pinRecent)) {
+      try await scratch.store.setPin(pin)
+    }
+  }
+
   @Test("retention removes what is old and keeps pins, configured folders and what is still named")
   func purge() async throws {
     let scratch = try Scratch()
@@ -350,10 +407,9 @@ struct ActivityStoreTests {
       cleared(ConfiguredLocation(location: place("/favorites/docs", file: 7)), for: .keepConfiguredIdentity))
     try await store.record(cleared(attempt("old", at: old, to: place("/work/a")), for: .reliabilityCounters))
     try await store.record(cleared(attempt("new", at: t0, to: place("/work/a")), for: .reliabilityCounters))
-    try scratch.raw { db in
-      try db.execute(
-        sql: "UPDATE dest_stat SET pinned = 1 WHERE location_id = (SELECT id FROM location WHERE path = '/old/pinned')")
-    }
+    try await store.setPin(
+      cleared(
+        DestinationPin(location: place("/old/pinned"), pinned: true), for: .pinRecent, menu))
 
     let counts = try await store.purge(olderThan: t0.addingTimeInterval(-ActivityStore.defaultRetention))
     // The ranking goes with its session, and the folder only it named goes with the ranking.

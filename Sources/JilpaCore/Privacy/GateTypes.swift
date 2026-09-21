@@ -104,6 +104,13 @@ public enum GateOperation: String, Sendable, CaseIterable {
   case suggestSensedProject
   case suggestFromHistory
   case showRecentsMenu
+  /// Pinning or unpinning a recent folder, which is a write to a counter that already exists.
+  /// It is the user's own act, made from a menu with no dialog and often no app in front, so it
+  /// needs no known app and a non-recording dialog does not forbid it — nothing new is learnt by
+  /// marking a row that is already there. Private mode refuses it because the list it is made
+  /// from is not shown there, so a pin in private mode could only be aimed at a row the user
+  /// cannot see.
+  case pinRecent
   /// Allowed here means only that privacy does not forbid it. Consent and the confidence gate
   /// are separate checks under the automation consent contract, and both must also pass.
   case navigateByPrediction
@@ -126,7 +133,8 @@ public enum GateOperation: String, Sendable, CaseIterable {
       .learn, .observeSaveOutcome, .reliabilityCounters:
       return true
     case .observeApp, .showPanel, .suggestExplicit, .suggestSensedProject, .suggestFromHistory,
-      .showRecentsMenu, .senseClipboard, .senseDeveloperContext, .keepConfiguredIdentity:
+      .showRecentsMenu, .pinRecent, .senseClipboard, .senseDeveloperContext,
+      .keepConfiguredIdentity:
       return false
     }
   }
@@ -141,8 +149,30 @@ public enum GateOperation: String, Sendable, CaseIterable {
   var allowedInNonRecordingDialog: Bool {
     switch self {
     case .observeApp, .showPanel, .navigateByRuleOrDefault, .suggestExplicit,
-      .suggestSensedProject, .senseDeveloperContext, .showRecentsMenu, .keepConfiguredIdentity:
+      .suggestSensedProject, .senseDeveloperContext, .showRecentsMenu, .pinRecent,
+      .keepConfiguredIdentity:
       return true
+    default: return false
+    }
+  }
+
+  /// The writes that record something Jilpa observed, as against the two that are the user's
+  /// own act on a folder: the identity kept for a folder they configured, and a pin on a
+  /// recent.
+  ///
+  /// It is the line the other three columns turn on. A record of activity names an app, so an
+  /// app exclusion can be checked against it and a known app is required; and it is exactly
+  /// what a non-recording dialog means there is to be none of. The user's own acts name no app
+  /// — a pin is on the folder, whatever mix of apps put counters under it — and are made from
+  /// Settings or a menu with no dialog in front, so neither column applies. Both are still
+  /// checked against the folder exclusions by lineage, which is the check that does not need an
+  /// app.
+  ///
+  /// Private mode is not this line: it keeps a configured folder's identity, which is the
+  /// user's own entry, and refuses a pin, which could only be aimed at a list it does not show.
+  var recordsActivity: Bool {
+    switch self {
+    case .storeShadowRanking, .learn, .reliabilityCounters: return true
     default: return false
     }
   }
@@ -150,7 +180,8 @@ public enum GateOperation: String, Sendable, CaseIterable {
   /// The operations whose result is written to the store.
   var persists: Bool {
     switch self {
-    case .storeShadowRanking, .learn, .reliabilityCounters, .keepConfiguredIdentity: return true
+    case .storeShadowRanking, .learn, .reliabilityCounters, .pinRecent, .keepConfiguredIdentity:
+      return true
     default: return false
     }
   }

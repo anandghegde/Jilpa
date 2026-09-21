@@ -97,13 +97,17 @@ struct Record: Excludable, Sendable, Equatable {
         #expect(!context.state.pausedApps.contains(app), "case \(id)")
         #expect(!context.state.exclusions.apps.contains(app), "case \(id)")
       }
-      // The identity of a folder the user configured is the one write that is no activity: it
-      // needs no dialog and no app, and private mode keeps it. It must be the user's own entry.
+      // The identity of a folder the user configured is the one write private mode allows, and
+      // it must be the user's own entry.
       if operation == .keepConfiguredIdentity {
         #expect(record.privacySubject.exposure == .explicit, "case \(id)")
         continue
       }
       #expect(!context.state.privateMode, "case \(id)")
+      // A write that records activity needs a dialog that records and an app for the exclusions
+      // to be checked against. A pin is neither: it marks a counter that is already there, from
+      // a menu with no dialog and often no app in front.
+      guard operation.recordsActivity else { continue }
       #expect(context.recording == .recording, "case \(id)")
       if context.app == nil { Issue.record("case \(id): cleared a write with no known app") }
     }

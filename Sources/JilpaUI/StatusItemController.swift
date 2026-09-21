@@ -7,7 +7,7 @@ import AppKit
 import JilpaCore
 
 /// Menu bar presence (S1). It carries the version, Quit, the favorites (D4) and the recents
-/// (D5); open Finder windows, pause and private mode land with the rest of WP6.
+/// with their pins (D5); open Finder windows, pause and private mode land with the rest of WP6.
 ///
 /// The controller holds no policy. It is told what the favorites and the recents are and
 /// reports which one was chosen; whether that means navigating the dialog in front or opening a
@@ -21,6 +21,9 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   public var onChooseFavorite: ((FavoritePlace) -> Void)?
   /// A recent folder chosen from the menu bar, named by its path.
   public var onChooseRecent: ((RecentPlace) -> Void)?
+  /// A recent folder pinned or unpinned. The controller says which place and which way; whether
+  /// the write is allowed is the app's question and the gate's, not this menu's.
+  public var onTogglePin: ((RecentPlace) -> Void)?
   /// The menu is about to be drawn. The app answers by handing over the recents it would offer
   /// now — freshly gated, because private mode may have moved since the menu was last built and
   /// a list held from then would be one the gate has already withdrawn.
@@ -120,6 +123,26 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
           systemSymbolName: place.pinned ? "pin.fill" : "clock", accessibilityDescription: nil)
         row.subtitle = place.detail
         menu.addItem(row)
+
+        // Held Option turns the row into its own pin toggle. An alternate rather than a
+        // submenu, because a row with a submenu fires no action of its own and going to the
+        // folder is what the row is for; and rather than a second permanent row, because the
+        // list would then be twice as long for something done once per folder. The title says
+        // which way it goes, so VoiceOver reads the act and not a state.
+        let toggle = NSMenuItem(
+          title: place.pinned
+            ? String(localized: "Unpin \(place.name)")
+            : String(localized: "Pin \(place.name)"),
+          action: #selector(pinPressed(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.indentationLevel = 1
+        toggle.representedObject = place.path
+        toggle.image = NSImage(
+          systemSymbolName: place.pinned ? "pin.slash" : "pin", accessibilityDescription: nil)
+        toggle.subtitle = place.detail
+        toggle.isAlternate = true
+        toggle.keyEquivalentModifierMask = .option
+        menu.addItem(toggle)
       }
     }
 
@@ -141,9 +164,19 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   }
 
   @objc private func recentPressed(_ sender: NSMenuItem) {
-    guard let path = sender.representedObject as? String,
-      let place = recents.first(where: { $0.path == path })
-    else { return }
+    guard let place = recent(sender) else { return }
     onChooseRecent?(place)
+  }
+
+  @objc private func pinPressed(_ sender: NSMenuItem) {
+    guard let place = recent(sender) else { return }
+    onTogglePin?(place)
+  }
+
+  /// The place a recents row stands for. Read from the list the menu was built from rather than
+  /// from the item, so a row that outlived a rebuild reaches nobody.
+  private func recent(_ sender: NSMenuItem) -> RecentPlace? {
+    guard let path = sender.representedObject as? String else { return nil }
+    return recents.first { $0.path == path }
   }
 }

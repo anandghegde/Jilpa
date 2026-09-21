@@ -22,6 +22,7 @@ import Testing
     Row(operation: .suggestSensedProject, normal: true, nonRecording: true, privateMode: false, pausedOrExcluded: false),
     Row(operation: .suggestFromHistory, normal: true, nonRecording: false, privateMode: false, pausedOrExcluded: false),
     Row(operation: .showRecentsMenu, normal: true, nonRecording: true, privateMode: false, pausedOrExcluded: false),
+    Row(operation: .pinRecent, normal: true, nonRecording: true, privateMode: false, pausedOrExcluded: false),
     Row(operation: .navigateByPrediction, normal: true, nonRecording: false, privateMode: false, pausedOrExcluded: false),
     Row(operation: .senseBrowser, normal: true, nonRecording: false, privateMode: false, pausedOrExcluded: false),
     Row(operation: .senseClipboard, normal: true, nonRecording: false, privateMode: false, pausedOrExcluded: false),
@@ -95,16 +96,24 @@ import Testing
     #expect(gate.permit(.clipboard, context) == nil)
   }
 
-  /// With no known app, exclusions cannot be checked, so nothing automates or persists. The one
-  /// exception is a folder the user configured: it comes from Settings, where there is no app,
-  /// and the record itself is still checked against the exclusions.
+  /// With no known app, exclusions cannot be checked, so nothing automates and nothing that
+  /// records activity persists. The writes that are not activity — the identity of a folder the
+  /// user configured, a pin on a recent — come from Settings or a menu, where there is no app,
+  /// and the record itself is still checked against the exclusions by lineage.
   @Test(arguments: matrix) func unknownAppNeitherAutomatesNorPersists(row: Row) {
     let context = GateContext(state: state(), app: nil)
     let decision = gate.decision(row.operation, context)
     #expect(decision == (row.operation.needsKnownApp ? .denied(.appUnknown) : .allowed))
-    if row.operation.persists, row.operation != .keepConfiguredIdentity {
-      #expect(row.operation.needsKnownApp)
+    if row.operation.persists {
+      #expect(row.operation.needsKnownApp == row.operation.recordsActivity)
     }
+  }
+
+  /// And the same line decides the non-recording column for a write: a non-recording dialog is
+  /// exactly the absence of activity to record, and says nothing about the user's own acts.
+  @Test(arguments: matrix) func onlyActivityWritesStopInANonRecordingDialog(row: Row) {
+    guard row.operation.persists else { return }
+    #expect(row.operation.allowedInNonRecordingDialog == !row.operation.recordsActivity)
   }
 
   struct Entry: Excludable, Sendable, Equatable {
