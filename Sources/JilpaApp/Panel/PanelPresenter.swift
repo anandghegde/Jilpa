@@ -30,9 +30,12 @@ import JilpaUI
 /// and the strip draws whichever of them is on top. It also answers the three history controls,
 /// which are `moveInHistory` under another name.
 ///
-/// What WP5 still adds: the hotkeys for Back, Forward and Return to original folder, and fuzzy
-/// jump. What WP6 adds: the destinations themselves. Here there is one, and it is the same one
-/// for every dialog.
+/// It is also what says when the dialog hotkeys may be registered at all (WP5, contract 2). It
+/// is the only thing that knows all three of the conditions at once: a supported dialog exists,
+/// its app is frontmost, and the dialog is that app's focused window.
+///
+/// What WP5 still adds: fuzzy jump. What WP6 adds: the destinations themselves. Here there is
+/// one, and it is the same one for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -57,6 +60,10 @@ public final class PanelPresenter: PanelActions {
   /// written. Recording never decides anything, so its absence changes no behaviour.
   private let recorder: NavigationRecorder?
   private var destination: URL
+
+  /// Told when the dialog scope opens and closes. Weak and optional: the presenter works
+  /// exactly the same without one, which is what the tests and the soak run with.
+  public weak var hotkeys: (any DialogHotkeys)?
 
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
@@ -93,6 +100,13 @@ public final class PanelPresenter: PanelActions {
     /// Where the strip goes. Nil when no side of the dialog had room, which is not the same as
     /// not having looked yet: the look happens before the strip is first drawn.
     var placement: PanelPlacement?
+    /// The element the last reading found the focus in. Only its place is compared: a listing
+    /// that was rebuilt is another element in the same part of the same dialog.
+    var focus: DialogFocus?
+    /// Whether the dialog is its app's focused window, as the last read of it said. Nil when
+    /// nothing has asked yet or the answer has been thrown away. Nil never opens the dialog
+    /// scope: that one opens on evidence and closes on the absence of it.
+    var isFocusedWindow: Bool?
   }
 
   /// What the workspace tells the strip: the frontmost app changed, or the Space did. Both can
@@ -154,6 +168,7 @@ public final class PanelPresenter: PanelActions {
     for observer in watching { center.removeObserver(observer) }
     watching.removeAll()
     host.hide()
+    closeScope()
     shown = nil
     tracker = PanelTracker(style: tracking)
     trails.removeAll()
@@ -182,6 +197,7 @@ public final class PanelPresenter: PanelActions {
       guard shown?.id == dialog.id else { return }
       shown?.descriptor = dialog.session.descriptor
       shown?.isEnabled = dialog.session.allowsManualNavigation
+      noteFocus(dialog.session.snapshot?.focus)
       noteSession(dialog.session)
       apply()
 
@@ -213,6 +229,9 @@ public final class PanelPresenter: PanelActions {
 
   private func dismiss(_ id: DialogSession.ID) {
     host.hide()
+    // Before `shown` goes: the chords are the dialog's, and there is no dialog now. Closing is
+    // the one direction that never waits for evidence.
+    closeScope()
     shown = nil
     tracker = PanelTracker(style: tracking)
   }
@@ -494,6 +513,7 @@ public final class PanelPresenter: PanelActions {
   /// The one rule for whether the strip is on screen, asked again after every move, every
   /// activation and every Space change.
   private func apply() {
+    updateScope()
     let visibility = PanelVisibility.decide(
       hasDialog: shown != nil,
       hostIsFrontmost: shown.map { frontmost() == $0.app.pid } ?? false,
@@ -513,6 +533,107 @@ public final class PanelPresenter: PanelActions {
       host.withdraw(fading: false)
     }
   }
+
+  // MARK: - The dialog scope
+
+  /// Whether the dialog chords are registered now.
+  private var scopeIsOpen = false
+  /// A focused-window read is in flight.
+  private var asking = false
+  /// Bumped by anything that makes the answer to that read worthless: another dialog, the app
+  /// leaving the front, a focus that moved. A read stamped with an older one is thrown away.
+  private var focusEpoch = 0
+
+  /// The three conditions of contract 2, asked again after every event, every move, every
+  /// activation and every Space change.
+  ///
+  /// Two of them are here to be read: a dialog exists, and its app is frontmost. The third
+  /// costs a round trip to the host, so it is remembered until something happens that could
+  /// change it. Opening waits for that answer; closing never waits for anything, because the
+  /// cost of a chord held a moment too long is that another app does not get its own key.
+  ///
+  /// `isEnabled` is a dialog Jilpa can drive. A move in flight keeps the scope open although it
+  /// is false for the length of the move: the dialog is the same dialog, and Back pressed twice
+  /// in a row should not need the first move to have finished.
+  private func updateScope() {
+    guard let target = shown, frontmost() == target.app.pid, target.isEnabled || moving != nil
+    else {
+      // The app being somewhere else makes the old answer worthless as well: ask again when it
+      // comes back rather than trusting what was true before the user left.
+      forgetFocusedWindow()
+      return closeScope()
+    }
+    guard let focused = target.isFocusedWindow else { return ask(target) }
+    if focused { openScope() } else { closeScope() }
+  }
+
+  private func openScope() {
+    guard !scopeIsOpen else { return }
+    scopeIsOpen = true
+    hotkeys?.setDialogScope(true)
+  }
+
+  private func closeScope() {
+    guard scopeIsOpen else { return }
+    scopeIsOpen = false
+    hotkeys?.setDialogScope(false)
+  }
+
+  private func forgetFocusedWindow() {
+    focusEpoch &+= 1
+    shown?.isFocusedWindow = nil
+  }
+
+  /// The focused element the last reading named.
+  ///
+  /// The scope hangs on the window having the focus, and the coordinator says nothing at all
+  /// when the focus goes to a window of the same app that is not a dialog: that reads as
+  /// `.notAPanel`, which raises no event. What it does say is where inside the dialog the focus
+  /// is, and a focus that left the dialog is not the same place. So a focused place that moved
+  /// is the trigger to ask the host again which window the focus is really in.
+  private func noteFocus(_ focus: DialogFocus?) {
+    let before = shown?.focus
+    shown?.focus = focus
+    let same =
+      switch (before, focus) {
+      case (nil, nil): true
+      case (let before?, let focus?): before.isSamePlace(as: focus)
+      default: false
+      }
+    if !same { forgetFocusedWindow() }
+  }
+
+  /// One read at a time, and the answer is kept only if nothing invalidated it while it ran.
+  /// Whatever comes back, the question is asked again: a dropped answer leaves it unanswered,
+  /// and an unanswered question is another read.
+  private func ask(_ target: Shown) {
+    guard !asking else { return }
+    asking = true
+    let epoch = focusEpoch
+    Task { @MainActor in
+      let focused = await self.readFocusedWindow(target)
+      self.asking = false
+      if epoch == self.focusEpoch, self.shown?.id == target.id {
+        self.shown?.isFocusedWindow = focused
+      }
+      self.updateScope()
+    }
+  }
+
+  /// Whether the dialog is its app's focused window, asked of the host.
+  ///
+  /// The same evidence `SafetyGuard` takes before every step of every move, read here for the
+  /// same reason and with no new hypothesis: a registered system hotkey is swallowed everywhere,
+  /// so a dialog left open behind whatever the user is really working in must not be holding
+  /// Back and Forward.
+  private func readFocusedWindow(_ target: Shown) async -> Bool {
+    guard let pid = target.window.pid else { return false }
+    let session = pool.session(for: pid)
+    let focused = try? await session.value(.focusedWindow, of: session.application).elementValue
+    return focused == target.window
+  }
+
+  // MARK: - Where the strip goes
 
   private func placement(of target: Shown) async -> PanelPlacement? {
     guard let geometry = await geometry(of: target.window, variant: target.variant) else {
