@@ -8,16 +8,25 @@ import AppKit
 /// The strip's window. One is made at launch and reused for every dialog.
 ///
 /// Non-activating throughout. Contract 2 says Jilpa never activates itself while a dialog is
-/// open, so this window is ordered front and never made key: no `makeKeyAndOrderFront`, no
-/// `NSApplication.activate`. Fuzzy jump is the one thing that will take key status, and it will
-/// do it by turning `takesKeys` on for as long as its field is up (WP6). Until then the answer
-/// is no.
+/// open, so this window is ordered front and never made key: no `NSApplication.activate`, and
+/// `makeKeyAndOrderFront` only from fuzzy jump, which turns `takesKeys` on for as long as its
+/// field is up. A non-activating panel made key that way delivers no activation and the host
+/// stays frontmost (spike 3b, 800 of 800). Every other caller gets `orderFront` and no keys.
 final class StripPanel: NSPanel {
   /// Only fuzzy jump turns this on, and only while it is open.
   var takesKeys = false
 
+  /// Key status went somewhere else. Fuzzy jump is the only thing that ever had it, so this is
+  /// the user clicking away from the field, and the field goes with them.
+  var onResignKey: (() -> Void)?
+
   override var canBecomeKey: Bool { takesKeys }
   override var canBecomeMain: Bool { false }
+
+  override func resignKey() {
+    super.resignKey()
+    onResignKey?()
+  }
 
   init() {
     super.init(

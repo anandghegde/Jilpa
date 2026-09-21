@@ -56,6 +56,12 @@ public struct PanelContents: Sendable, Equatable {
 public protocol PanelActions: AnyObject {
   func panelChoseDestination()
   func panelChoseHistory(_ move: HistoryMove)
+  /// Return in the fuzzy jump, with whatever was highlighted. Nothing has been sent to the
+  /// dialog: the app gives key status back, checks that the dialog came back as it was left and
+  /// only then asks the Navigator for the folder (D11, contract 1).
+  func panelChoseJump(_ choice: JumpChoice)
+  /// Escape, or key status lost some other way. Nothing was chosen and nothing is sent.
+  func panelClosedJump()
 }
 
 /// The strip's one window and its contents (D2).
@@ -84,6 +90,23 @@ public final class PanelHost {
   /// The shortest a notice is worth truncating to. Below this the notice draws as its symbol
   /// alone and the line is left to the tooltip and to VoiceOver.
   static let noticeFloor: CGFloat = 120
+
+  /// Fuzzy jump's field and rows (D11). The field is drawn in the strip's own window, grown
+  /// away from the dialog, so that `takesKeys` is the whole of what key status costs.
+  public static let jumpRows = 8
+  static let jumpFieldHeight: CGFloat = 24
+  static let jumpRowHeight: CGFloat = 36
+  static let jumpSpacing: CGFloat = 4
+  static let jumpInset: CGFloat = 8
+  /// Wide enough for a path, and no wider: the jump is a field, not a window.
+  static let jumpPreferredWidth: CGFloat = 420
+  static let jumpMinimumWidth: CGFloat = 260
+
+  /// What `JumpLayout` grows the strip by. The field's share carries the gap under it, so the
+  /// arithmetic there is the arithmetic the views lay out to.
+  public static let jumpMetrics = JumpMetrics(
+    fieldHeight: jumpFieldHeight + jumpSpacing, rowHeight: jumpRowHeight, inset: jumpInset,
+    preferredWidth: jumpPreferredWidth, minimumWidth: jumpMinimumWidth, maximumRows: jumpRows)
 
   public weak var actions: (any PanelActions)?
 
@@ -114,6 +137,8 @@ public final class PanelHost {
   let noticeZone: NSStackView
   let noticeSymbol: NSImageView
   let notice: NSTextField
+  /// The fuzzy jump, in the same window as the zones and never up at the same time.
+  let jump: JumpView
 
   private var contents: PanelContents?
   /// The side the strip is docked to, which decides whether the zones run across or down.
@@ -126,8 +151,24 @@ public final class PanelHost {
   private var fade = 0
   /// The line VoiceOver was last told about, so a redraw that says the same thing says it once.
   private var announced: String?
+  /// Whether the fuzzy jump's field is up. While it is, the strip keeps the frame the jump was
+  /// grown to and the zones are not drawn: a placement that arrived meanwhile is applied when
+  /// the field closes.
+  public private(set) var isJumpOpen = false
+  /// A close in progress. Giving key status back takes the window off screen, which is also how
+  /// the user losing it looks, and only one of the two is worth telling the app about.
+  private var closingJump = false
+  /// What holds the field in the window, made once and activated only while it is in.
+  private lazy var jumpConstraints: [NSLayoutConstraint] = [
+    jump.leadingAnchor.constraint(equalTo: background.content.leadingAnchor),
+    jump.trailingAnchor.constraint(equalTo: background.content.trailingAnchor),
+    jump.topAnchor.constraint(equalTo: background.content.topAnchor),
+    jump.bottomAnchor.constraint(equalTo: background.content.bottomAnchor),
+  ]
 
-  public init() {
+  /// `signposts` times the one path in the strip with a budget: the jump's list, per
+  /// keystroke. Silent by default, because the strip draws whether or not anyone is measuring.
+  public init(signposts: Signposts = .silent) {
     window = StripPanel()
     ticker = FrameTicker(window: window)
 
@@ -178,7 +219,22 @@ public final class PanelHost {
     zones.edgeInsets = NSEdgeInsets(
       top: 4, left: Self.inset, bottom: 4, right: Self.inset)
 
-    background = StripBackground(content: zones)
+    // One container so that the zones and the jump can trade places without either of them
+    // owning the window's content view. The jump is made here and put in only while its field
+    // is up: a view pinned into the window carries its height into the window's minimum size,
+    // and a strip that cannot be 40 points tall is not a strip.
+    jump = JumpView(rowCount: Self.jumpRows, signposts: signposts)
+    let container = NSView()
+    zones.translatesAutoresizingMaskIntoConstraints = false
+    jump.translatesAutoresizingMaskIntoConstraints = false
+    container.addSubview(zones)
+    NSLayoutConstraint.activate([
+      zones.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      zones.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      zones.topAnchor.constraint(equalTo: container.topAnchor),
+      zones.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+    ])
+    background = StripBackground(content: container)
     window.contentView = background
 
     for (move, control) in historyButtons {
@@ -197,6 +253,18 @@ public final class PanelHost {
     NSWorkspace.shared.notificationCenter.addObserver(
       self, selector: #selector(displayOptionsChanged),
       name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+
+    jump.onChoose = { [weak self] in
+      // Return with nothing to take leaves the field up: a refused path is a destination the
+      // user named and a query that matched nothing is one they are still typing.
+      guard let self, let choice = self.jump.chosen else { return }
+      self.actions?.panelChoseJump(choice)
+    }
+    jump.onCancel = { [weak self] in self?.actions?.panelClosedJump() }
+    window.onResignKey = { [weak self] in
+      guard let self, self.isJumpOpen, !self.closingJump else { return }
+      self.actions?.panelClosedJump()
+    }
   }
 
   @objc private func displayOptionsChanged() { background.refresh() }
@@ -223,6 +291,9 @@ public final class PanelHost {
   /// off screen coming back. A strip already on screen is moved, never faded: under live
   /// tracking this runs every refresh, and an animation there would fight the frame it is given.
   public func move(to placement: PanelPlacement, fading: Bool = false) {
+    // The jump owns the frame while its field is up. The strip goes back to where the dialog
+    // says it belongs when the field closes, which is one placement later at worst.
+    guard !isJumpOpen else { return }
     fade += 1
     side = placement.side
     window.setFrame(placement.frame, display: false)
@@ -242,7 +313,7 @@ public final class PanelHost {
   /// app is not frontmost, or it is being dragged and `fadeOnMove` is on. `fading` animates it,
   /// which Reduce Motion turns back into the plain thing.
   public func withdraw(fading: Bool) {
-    guard window.isVisible else { return }
+    guard window.isVisible, !isJumpOpen else { return }
     fade += 1
     guard fading, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
       window.orderOut(nil)
@@ -298,6 +369,9 @@ public final class PanelHost {
   /// The dialog is gone. The strip stops following, goes away and forgets what it said, so the
   /// next dialog cannot inherit a line about this one.
   public func hide() {
+    // The dialog is gone, so there is nothing left to give key status back to and nothing left
+    // to jump in. The app is the one calling this, so it is not told about the close.
+    closeJump(to: nil)
     fade += 1
     ticker.stop()
     window.orderOut(nil)
@@ -306,10 +380,60 @@ public final class PanelHost {
     announced = nil
   }
 
+  // MARK: - Fuzzy jump
+
+  /// Grows the strip into the fuzzy jump and gives its field key status (D11).
+  ///
+  /// This is the one time Jilpa's own window becomes key, and it becomes key without activating:
+  /// a non-activating panel made key delivers no activation and the host stays frontmost (spike
+  /// 3b, 800 of 800). It is the caller that has already captured what it will check when the
+  /// field closes, and the caller that navigates; the field only ever names a folder.
+  public func openJump(_ state: JumpState, at placement: JumpPlacement) {
+    guard window.isVisible, !isJumpOpen else { return }
+    isJumpOpen = true
+    side = placement.side
+    jump.begin(state)
+    zones.isHidden = true
+    background.content.addSubview(jump)
+    NSLayoutConstraint.activate(jumpConstraints)
+    window.setFrame(placement.frame, display: true)
+    window.takesKeys = true
+    window.makeKeyAndOrderFront(nil)
+    window.makeFirstResponder(jump.field)
+  }
+
+  /// Takes the field away, gives key status back and puts the strip back where it was.
+  ///
+  /// Key status goes back the way spike 3b measured it going back: the panel leaves the screen,
+  /// which hands the keyboard to the window that had it, and comes back without it. Whether it
+  /// really came back to the right place is the caller's question, asked of the host and not of
+  /// AppKit.
+  public func closeJump(to placement: PanelPlacement?) {
+    guard isJumpOpen else { return }
+    isJumpOpen = false
+    closingJump = true
+    // Out of the window before its frame changes: while the field is in it, the field's own
+    // height is the window's smallest.
+    NSLayoutConstraint.deactivate(jumpConstraints)
+    jump.removeFromSuperview()
+    zones.isHidden = false
+    window.orderOut(nil)
+    window.takesKeys = false
+    if let placement {
+      side = placement.side
+      window.setFrame(placement.frame, display: false)
+      relayout()
+      window.alphaValue = 1
+      window.orderFront(nil)
+    }
+    closingJump = false
+  }
+
   // MARK: - The zones
 
   /// Fits the zones into the strip's length and draws each at the detail it was given.
   private func relayout() {
+    guard !isJumpOpen else { return }
     let horizontal = side.isHorizontal
     zones.orientation = horizontal ? .horizontal : .vertical
     zones.alignment = horizontal ? .centerY : .centerX

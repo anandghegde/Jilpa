@@ -100,15 +100,18 @@ final class DialogAgent {
     // The presenter is what knows whether a supported dialog has the focus of the frontmost app,
     // which is the whole of contract 2's condition for a dialog chord.
     presenter.hotkeys = hotkeys
-    // The three history controls, which are also the three actions WP5 ships an answer for.
-    // Everything else in the table is answered by nothing yet and so registered for nothing: a
-    // chord held for an action that does nothing is a key taken from every other app for nothing.
+    // The three history controls and fuzzy jump, which are the four actions WP5 ships an answer
+    // for. Everything else in the table is answered by nothing yet and so registered for
+    // nothing: a chord held for an action that does nothing is a key taken from every other app
+    // for nothing.
     let presenter = self.presenter
     for (action, move): (HotkeyAction, HistoryMove) in [
       (.back, .back), (.forward, .forward), (.returnToOriginal, .returnToOriginal),
     ] {
       hotkeys.answer(action) { [weak presenter] in presenter?.moveInHistory(move) }
     }
+    // The one chord that takes key status, and the only focus change Jilpa initiates (D11).
+    hotkeys.answer(.fuzzyJump) { [weak presenter] in presenter?.openJump() }
   }
 
   /// The activity store, or nothing.

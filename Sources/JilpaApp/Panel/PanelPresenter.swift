@@ -34,8 +34,14 @@ import JilpaUI
 /// is the only thing that knows all three of the conditions at once: a supported dialog exists,
 /// its app is frontmost, and the dialog is that app's focused window.
 ///
-/// What WP5 still adds: fuzzy jump. What WP6 adds: the destinations themselves. Here there is
-/// one, and it is the same one for every dialog.
+/// It owns fuzzy jump (WP5, D11), which is the one time Jilpa's own window takes key status.
+/// What the field can do is bounded by what is read before it opens: the element that holds the
+/// keyboard and what the name field holds are captured from the host, and Return navigates only
+/// once the host has said that both came back. Nothing is ever sent to the dialog while the
+/// field is up, so every way the jump can end leaves the dialog exactly as the user left it.
+///
+/// What WP6 adds: the destinations themselves. Here there is one, and it is the same one for
+/// every dialog; the jump offers it and wherever this dialog has already been.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -68,6 +74,13 @@ public final class PanelPresenter: PanelActions {
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
   private var pump: Task<Void, Never>?
+
+  /// What fuzzy jump captured before it took key status. Nil whenever no field is up, which is
+  /// also what says the dialog chords may be registered again.
+  private var handoff: JumpHandoff?
+  /// An open or a close is in flight. One at a time: both read the host, and a second would
+  /// race the first to the same window.
+  private var jumpBusy = false
   /// A frame read is in flight, and whether anything asked for another while it ran.
   private var placing = false
   private var placeAgain = false
@@ -167,6 +180,7 @@ public final class PanelPresenter: PanelActions {
     let center = NSWorkspace.shared.notificationCenter
     for observer in watching { center.removeObserver(observer) }
     watching.removeAll()
+    cancelJump()
     host.hide()
     closeScope()
     shown = nil
@@ -228,6 +242,9 @@ public final class PanelPresenter: PanelActions {
   }
 
   private func dismiss(_ id: DialogSession.ID) {
+    // Before the strip goes: a field open over a dialog that has closed has nothing left to
+    // give the keyboard back to, and nothing left to check against.
+    cancelJump()
     host.hide()
     // Before `shown` goes: the chords are the dialog's, and there is no dialog now. Closing is
     // the one direction that never waits for evidence.
@@ -556,6 +573,10 @@ public final class PanelPresenter: PanelActions {
   /// is false for the length of the move: the dialog is the same dialog, and Back pressed twice
   /// in a row should not need the first move to have finished.
   private func updateScope() {
+    // While the field is up it holds the keyboard, and a system hotkey is swallowed everywhere:
+    // a dialog chord fired into a text field the user is typing a path into would be the chord
+    // doing something they cannot see.
+    guard handoff == nil else { return closeScope() }
     guard let target = shown, frontmost() == target.app.pid, target.isEnabled || moving != nil
     else {
       // The app being somewhere else makes the old answer worthless as well: ask again when it
@@ -669,4 +690,201 @@ public final class PanelPresenter: PanelActions {
     else { return nil }
     return CGRect(origin: origin, size: size)
   }
+
+  // MARK: - Fuzzy jump
+
+  /// What the field captured from the dialog before it took key status, so that what it gives
+  /// back can be compared against it (D11, contracts 1 and 2).
+  private struct JumpHandoff {
+    var id: DialogSession.ID
+    var window: AXElement
+    var variant: DialogVariant
+    var pid: pid_t
+    /// The element that held the keyboard, and must hold it again.
+    var focus: AXElement?
+    /// The name field, when this dialog has one.
+    var field: AXElement?
+    var capture: FieldCapture
+    /// Where the strip goes back to when the field closes.
+    var placement: PanelPlacement
+  }
+
+  /// The open or the close the last chord started. Here for the same reason `pending` is: the
+  /// soak and the tests can wait for one, and the app never does.
+  public private(set) var pendingJump: Task<Void, Never>?
+
+  /// Whether the field is up. The health view and the tests read it; nothing decides on it but
+  /// the presenter itself.
+  public var isJumpOpen: Bool { handoff != nil }
+
+  /// The fuzzy jump chord (D11). `HotkeyCenter` answers `.fuzzyJump` with this.
+  ///
+  /// Taking key status is the only focus change Jilpa ever makes (contract 2), so it is not made
+  /// on a guess. What holds the keyboard and what the name field holds are read from the host
+  /// first, and given back to the host to compare when the field closes.
+  public func openJump() {
+    guard handoff == nil, !jumpBusy else { return }
+    jumpBusy = true
+    pendingJump = Task { @MainActor in
+      await self.beginJump()
+      self.jumpBusy = false
+    }
+  }
+
+  private func beginJump() async {
+    guard !host.isJumpOpen, let target = shown, let placement = target.placement,
+      target.isEnabled, frontmost() == target.app.pid, let pid = target.window.pid
+    else { return }
+
+    // Where the field would go. The strip is already beside the dialog and the field grows it
+    // away from there; when the room between the strip and the edge of the screen is not enough
+    // for the field and one row there is no field, and the dialog is exactly as usable as it
+    // was without Jilpa.
+    guard let geometry = await geometry(of: target.window, variant: target.variant),
+      let primary = NSScreen.screens.first
+    else { return note(target.id, JumpNotices.dialogUnreadable()) }
+    let screens = screens()
+    guard placement.screen < screens.count else { return }
+    let dialog = PanelDocking.flipped(geometry.frame, primaryHeight: primary.frame.height)
+    guard
+      let layout = JumpLayout.grow(
+        from: placement, dialog: dialog, visible: screens[placement.screen].visibleFrame,
+        metrics: PanelHost.jumpMetrics)
+    else { return note(target.id, JumpNotices.noRoom()) }
+
+    // What has to come back. An unreadable name field is the one answer that stops the jump
+    // before it starts: a dialog whose filename Jilpa cannot check afterwards is not one it
+    // takes the keyboard away from.
+    let field = await coordinator.dialog(target.id)?.session.snapshot?.anchors.nameField
+    let capture = await read(field, of: pid)
+    guard capture.isVerifiable else { return note(target.id, JumpNotices.fieldUnreadable()) }
+    let session = pool.session(for: pid)
+    let focus = try? await session.value(.focusedElement, of: session.application).elementValue
+
+    // Every read above is a round trip into another process, and everything they were about can
+    // have moved while they ran.
+    guard shown?.id == target.id, frontmost() == target.app.pid, !host.isJumpOpen else { return }
+    handoff = JumpHandoff(
+      id: target.id, window: target.window, variant: target.variant, pid: pid, focus: focus,
+      field: field, capture: capture, placement: placement)
+    host.openJump(
+      JumpState(jumpList(for: target), home: NSHomeDirectory(), limit: layout.rows), at: layout)
+    // The dialog chords go with the keyboard, and the keyboard is no longer the dialog's.
+    apply()
+  }
+
+  /// Return, with whatever the field had highlighted.
+  public func panelChoseJump(_ choice: JumpChoice) {
+    guard let handoff else { return }
+    // The field goes first, and the keyboard with it. Nothing is asked of the dialog until it
+    // has the keyboard back, because every check is about the state the dialog is in without
+    // Jilpa's field in front of it.
+    self.handoff = nil
+    host.closeJump(to: handoff.placement)
+    apply()
+    guard !jumpBusy else { return }
+    jumpBusy = true
+    pendingJump = Task { @MainActor in
+      await self.finishJump(handoff, choice: choice)
+      self.jumpBusy = false
+    }
+  }
+
+  /// Escape, or key status lost some other way. The keyboard goes back and nothing is sent:
+  /// there is nothing to verify, because there was never anything to undo.
+  public func panelClosedJump() {
+    guard let handoff else { return }
+    self.handoff = nil
+    host.closeJump(to: handoff.placement)
+    apply()
+  }
+
+  /// The dialog went away, or the presenter stopped. The field goes with it and nothing is
+  /// checked: there is no dialog left to check against.
+  private func cancelJump() {
+    guard handoff != nil else { return }
+    handoff = nil
+    host.closeJump(to: nil)
+  }
+
+  /// Return's other half: is this the same dialog, in the same state, with the keyboard back
+  /// where it was? Only then does the choice become a folder change, and it goes through the
+  /// Navigator like every other one.
+  private func finishJump(_ handoff: JumpHandoff, choice: JumpChoice) async {
+    let name = choice.paths.first.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+    guard let target = shown, target.id == handoff.id else { return }
+    // The same evidence every step of every move takes, in the same order, from the same code.
+    let guardian = SafetyGuard(
+      dialog: handoff.window, variant: handoff.variant, host: pool.host(for: handoff.pid),
+      userActive: { [latch] in latch.isActive(handoff.id) })
+    if let failure = await guardian.check(window: handoff.window, focus: handoff.focus) {
+      return note(handoff.id, NavigationNotices.notice(for: failure, going: name))
+    }
+    // The half the guard does not do: the name this dialog proposed is the name it still
+    // proposes, and the insertion point is where it was (contract 1, spike 3b).
+    let now = await read(handoff.field, of: handoff.pid)
+    if let loss = handoff.capture.loss(after: now) {
+      return note(handoff.id, NavigationNotices.notice(for: loss))
+    }
+    guard let folder = await resolve(choice) else {
+      return note(handoff.id, JumpNotices.notThere(name))
+    }
+    let source: ManualSource = if case .path = choice { .pathEntry } else { .fuzzyJump }
+    await move(target, to: folder, trigger: .manual(source))
+  }
+
+  /// The folder a choice names, or nil when nothing it names is a folder that is there.
+  ///
+  /// A typed path can have two readings and the first that is there wins. Both are readings of
+  /// what the user typed, so neither is a substitute for the other; nothing that is missing is
+  /// replaced by anything that is (contract 5).
+  private func resolve(_ choice: JumpChoice) async -> URL? {
+    for path in choice.paths {
+      let place = await locate(URL(fileURLWithPath: path, isDirectory: true))
+      guard let place, place.kind == .folder else { continue }
+      return URL(fileURLWithPath: place.path, isDirectory: true)
+    }
+    return nil
+  }
+
+  /// The name field as it is now. `absent` when the dialog has none, which an Open dialog does
+  /// not: there is then nothing to preserve and nothing to compare.
+  private func read(_ field: AXElement?, of pid: pid_t) async -> FieldCapture {
+    guard let field else { return .absent }
+    let session = pool.session(for: pid)
+    guard let values = try? await session.values([.value, .selectedTextRange], of: field),
+      let text = values[.value]?.stringValue
+    else { return .unreadable }
+    return .read(text: text, selection: values[.selectedTextRange]?.rangeValue)
+  }
+
+  /// What the field offers.
+  ///
+  /// WP6 replaces this with the ranked set — favorites, recents, open windows and the
+  /// suggestions. Here it is the one destination the strip's button goes to and wherever this
+  /// dialog has already been, newest first, which is enough for the field to be worth opening.
+  private func jumpList(for target: Shown) -> JumpList {
+    var rows = [
+      JumpRow(
+        path: destination.path, title: destination.lastPathComponent,
+        detail: destination.deletingLastPathComponent().path, source: .suggestion)
+    ]
+    for entry in (trails[target.id]?.history.entries ?? []).reversed()
+    where entry.kind == .folder && !rows.contains(where: { $0.path == entry.path }) {
+      let url = URL(fileURLWithPath: entry.path, isDirectory: true)
+      rows.append(
+        JumpRow(
+          path: entry.path, title: url.lastPathComponent,
+          detail: url.deletingLastPathComponent().path, source: .history))
+    }
+    return JumpList(rows)
+  }
+
+  /// One line on the dialog under the strip, when it is still that dialog.
+  private func note(_ id: DialogSession.ID, _ notice: Notice) {
+    guard shown?.id == id else { return }
+    shown?.line.show(notice)
+    apply()
+  }
+
 }

@@ -28,7 +28,7 @@ enum NavigationNotices {
   /// The Navigator's refusals. Spelled out because `JilpaCore` has a `RefusalReason` of
   /// its own, for a destination the rules would not give, and this file is about the other
   /// one: a folder change that was asked for and did not happen.
-  private typealias Refusal = JilpaNavigator.RefusalReason
+  typealias Refusal = JilpaNavigator.RefusalReason
 
   /// The line for one finished move, or nothing when the move arrived with everything intact.
   /// `target` is the destination's display name, so a line can name where it was going without
@@ -87,7 +87,33 @@ enum NavigationNotices {
 
   // MARK: - The reasons
 
-  private static func line(for reason: Refusal, going target: String) -> String {
+  /// A check that stopped something before anything was sent. Fuzzy jump's handoff takes the
+  /// same evidence `SafetyGuard` takes before every step of a move, so it says the same things
+  /// about it rather than a second set of words for the same facts.
+  static func notice(for failure: SafetyGuard.Failure, going target: String) -> Notice {
+    Notice(.unavailable, line(for: failure.refusal, going: target))
+  }
+
+  /// What fuzzy jump found when it gave the keyboard back. The field only ever held key status,
+  /// so every one of these lines may say that nothing was sent.
+  static func notice(for loss: FieldLoss) -> Notice {
+    switch loss {
+    case .unreadable:
+      Notice(
+        .unavailable,
+        String(localized: "This dialog's filename field stopped answering, so Jilpa sent nothing."))
+    case .textChanged:
+      Notice(
+        .unavailable,
+        String(localized: "The filename changed while the jump field was open, so Jilpa sent nothing."))
+    case .selectionChanged:
+      Notice(
+        .unavailable,
+        String(localized: "Something else took the keyboard, so Jilpa sent nothing."))
+    }
+  }
+
+  static func line(for reason: Refusal, going target: String) -> String {
     switch reason {
     case .panelNotReady:
       String(localized: "Jilpa cannot read this dialog yet.")

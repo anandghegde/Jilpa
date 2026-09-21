@@ -20,7 +20,7 @@ public enum SignpostName: String, Sendable, CaseIterable, LogSafe {
   case navigate
   /// One step of a navigation strategy.
   case navigateStep = "navigate-step"
-  /// Quick Search, per keystroke.
+  /// One keystroke in the fuzzy jump's field or in Quick Search: the query, matched.
   case search
 
   public var category: SignpostCategory {

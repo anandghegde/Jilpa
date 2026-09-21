@@ -22,7 +22,7 @@ struct PanelHostTests {
     #expect(panel.becomesKeyOnlyIfNeeded)
   }
 
-  /// Fuzzy jump is the one thing that takes key status, and only while its field is up (WP6).
+  /// Fuzzy jump is the one thing that takes key status, and only while its field is up (D11).
   @Test func onlyFuzzyJumpTurnsKeysOn() {
     let panel = StripPanel()
     panel.takesKeys = true
@@ -353,6 +353,228 @@ struct PanelHostTests {
     #expect(ticks == 0)
   }
 
+  // MARK: - Fuzzy jump
+
+  /// The one time Jilpa's own window takes key status (contract 2, D11). It is the same window
+  /// the strip lives in, so `takesKeys` is the whole of what the jump costs, and it is on only
+  /// while the field is up.
+  @Test func theJumpIsTheOnlyThingThatTakesTheKeysAndItGivesThemBack() {
+    let host = shown()
+    #expect(!host.window.takesKeys)
+
+    host.openJump(state(), at: jump())
+    #expect(host.isJumpOpen)
+    #expect(host.window.takesKeys && host.window.canBecomeKey)
+    // Key status, never main: the host's dialog stays the main window it was.
+    #expect(!host.window.canBecomeMain)
+
+    host.closeJump(to: placement(.below))
+    #expect(!host.isJumpOpen)
+    #expect(!host.window.takesKeys && !host.window.canBecomeKey)
+  }
+
+  @Test func theJumpTakesTheBoxItWasGivenAndGivesTheStripBackAfterwards() {
+    let host = shown()
+    let strip = placement(.below)
+    let box = jump()
+    host.openJump(state(), at: box)
+    #expect(host.window.frame == box.frame)
+    // The strip's own controls are not drawn behind the field.
+    #expect(host.zones.isHidden)
+    #expect(host.jump.superview != nil)
+
+    host.closeJump(to: strip)
+    #expect(host.window.frame == strip.frame)
+    #expect(!host.zones.isHidden)
+    #expect(host.jump.superview == nil)
+    #expect(host.isVisible && host.window.alphaValue == 1)
+    // What the strip said is what it says again.
+    #expect(host.button.title == "Invoices")
+  }
+
+  /// The dialog moved, or its app went away, while the field was up. The jump does not follow
+  /// it: a box that jumps out from under a half-typed path is worse than one that waits.
+  @Test func nothingMovesTheStripWhileTheFieldIsUp() {
+    let host = shown()
+    let box = jump()
+    host.openJump(state(), at: box)
+
+    host.move(to: placement(.right, length: 400))
+    #expect(host.window.frame == box.frame)
+    host.withdraw(fading: false)
+    #expect(host.isVisible && host.window.frame == box.frame)
+    host.update(PanelContents(destination: "Reports", isEnabled: true))
+    #expect(host.window.frame == box.frame)
+  }
+
+  /// The dialog closed. Whatever was typed goes with it, keys and all — there is nothing left
+  /// to navigate.
+  @Test func hidingClosesTheJumpAndTakesTheKeysBack() {
+    let host = shown()
+    host.openJump(state(), at: jump())
+    host.hide()
+    #expect(!host.isJumpOpen && !host.window.takesKeys && !host.isVisible)
+  }
+
+  /// Return hands back what is highlighted; the host navigates nothing itself. Escape hands
+  /// back nothing at all, and the app is what gives the dialog its keyboard again.
+  @Test func returnReportsTheChoiceAndEscapeReportsTheClose() {
+    let host = shown()
+    let listener = Listener()
+    host.actions = listener
+    host.openJump(state(), at: jump())
+
+    let editor = NSTextView()
+    _ = host.jump.control(
+      host.jump.field, textView: editor, doCommandBy: #selector(NSResponder.moveDown(_:)))
+    _ = host.jump.control(
+      host.jump.field, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:)))
+    #expect(listener.chosen.count == 1)
+    #expect(listener.chosen.first?.paths == ["/Users/ada/Downloads"])
+    #expect(listener.closes == 0)
+
+    _ = host.jump.control(
+      host.jump.field, textView: editor, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+    #expect(listener.closes == 1)
+  }
+
+  /// Tab moves the highlight rather than the focus: the field is holding another app's
+  /// keyboard, and a Tab that left it would drop that hold somewhere Jilpa cannot see.
+  @Test func tabStaysInsideTheField() {
+    let host = shown()
+    host.openJump(state(), at: jump())
+    let editor = NSTextView()
+    #expect(
+      host.jump.control(
+        host.jump.field, textView: editor, doCommandBy: #selector(NSResponder.insertTab(_:))))
+    #expect(host.jump.state.highlight == 1)
+    #expect(
+      host.jump.control(
+        host.jump.field, textView: editor, doCommandBy: #selector(NSResponder.insertBacktab(_:))))
+    #expect(host.jump.state.highlight == 0)
+    // A key the field does keep for itself is left to it.
+    #expect(
+      !host.jump.control(
+        host.jump.field, textView: editor,
+        doCommandBy: #selector(NSResponder.deleteBackward(_:))))
+  }
+
+  /// Key status went somewhere else, which for this window means the user clicked away from
+  /// the field. The field goes with them.
+  @Test func clickingAwayFromTheFieldClosesTheJump() {
+    let host = shown()
+    let listener = Listener()
+    host.actions = listener
+    host.openJump(state(), at: jump())
+    host.window.resignKey()
+    #expect(listener.closes == 1)
+
+    // The close itself takes key status away, and that is not a second close.
+    listener.closes = 0
+    host.closeJump(to: placement(.below))
+    #expect(listener.closes == 0)
+  }
+
+  @Test func aRowReportsTheChoiceItDraws() {
+    let host = shown()
+    let listener = Listener()
+    host.actions = listener
+    host.openJump(state(), at: jump())
+    host.jump.rows[1].onChoose?(1)
+    #expect(listener.chosen.first?.paths == ["/Users/ada/Downloads"])
+  }
+
+  /// The rows are made once, at the most any screen has room for, because a keystroke in front
+  /// of a dialog the user is in the middle of is no time to be building views.
+  @Test func onlyTheRowsThereIsSomethingToShowInAreDrawn() {
+    let host = shown()
+    host.openJump(state(), at: jump())
+    #expect(host.jump.rows.count == PanelHost.jumpRows)
+    #expect(host.jump.rows.filter { !$0.isHidden }.count == 2)
+    #expect(host.jump.rows[0].isHighlighted && !host.jump.rows[1].isHighlighted)
+    #expect(host.jump.rows[0].accessibilityLabel() == "Invoices, /Users/ada")
+    #expect(host.jump.field.accessibilityLabel()?.isEmpty == false)
+    #expect(host.jump.field.placeholderString?.isEmpty == false)
+  }
+
+  /// A path the user named that Jilpa will not follow says why. Contract 5: there is no nearby
+  /// folder it goes to instead.
+  @Test func theLineSaysWhyThereIsNothingToChoose() {
+    let host = shown()
+    host.openJump(state(), at: jump())
+    #expect(host.jump.line.isHidden)
+
+    host.jump.field.stringValue = "zzzzz"
+    host.jump.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+    #expect(!host.jump.line.isHidden && !host.jump.line.stringValue.isEmpty)
+    #expect(host.jump.rows.filter { !$0.isHidden }.isEmpty)
+
+    host.jump.field.stringValue = "file://elsewhere/Users/ada"
+    host.jump.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+    #expect(host.jump.line.stringValue == JumpView.text(for: .remoteHost))
+  }
+
+  /// The list is searched on the main thread, once per keystroke, in front of a dialog the
+  /// user is typing into. The PRD gives that 30 ms, so it is timed.
+  @Test func eachKeystrokeIsTimed() {
+    let stats = IntervalStats()
+    let host = PanelHost(signposts: Signposts(stats: stats))
+    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.openJump(state(), at: jump())
+    host.jump.field.stringValue = "inv"
+    host.jump.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+    #expect(stats.summaries.map(\.name) == [SignpostName.search.rawValue])
+    #expect(stats.summaries.first?.budgetMs == 30)
+  }
+
+  /// A query left over from the last dialog is not what this one was opened for.
+  @Test func eachJumpStartsOnAnEmptyField() {
+    let host = shown()
+    host.openJump(state(), at: jump())
+    host.jump.field.stringValue = "invo"
+    host.jump.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+    host.closeJump(to: placement(.below))
+
+    host.openJump(state(), at: jump())
+    #expect(host.jump.field.stringValue.isEmpty)
+    #expect(host.jump.state.query.isEmpty)
+    #expect(host.jump.rows.filter { !$0.isHidden }.count == 2)
+  }
+
+  /// Every source draws as itself, and the symbol is a real one: a row with no image is a row
+  /// the eye cannot sort.
+  @Test func everySourceHasASymbolOfItsOwn() {
+    let symbols = JumpSource.allCases.map(JumpView.symbol(for:))
+    let images = symbols.compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+    #expect(Set(symbols).count == JumpSource.allCases.count)
+    #expect(images.count == symbols.count)
+  }
+
+  /// A strip already on screen, which is the only state the chord exists in: it is held only
+  /// while a supported dialog has the keys (contract 2).
+  private func shown() -> PanelHost {
+    let host = PanelHost()
+    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    return host
+  }
+
+  private func state() -> JumpState {
+    JumpState(
+      JumpList([
+        JumpRow(
+          path: "/Users/ada/Invoices", title: "Invoices", detail: "/Users/ada",
+          source: .suggestion),
+        JumpRow(
+          path: "/Users/ada/Downloads", title: "Downloads", detail: "/Users/ada",
+          source: .history),
+      ]), home: "/Users/ada", limit: PanelHost.jumpRows)
+  }
+
+  private func jump(rows: Int = PanelHost.jumpRows) -> JumpPlacement {
+    JumpPlacement(
+      frame: CGRect(x: 120, y: 80, width: 420, height: 380), rows: rows, side: .below, screen: 0)
+  }
+
   private func placement(_ side: DockSide, length: CGFloat = 600) -> PanelPlacement {
     let frame =
       side.isHorizontal
@@ -366,6 +588,10 @@ struct PanelHostTests {
 private final class Listener: PanelActions {
   var presses = 0
   var moves: [HistoryMove] = []
+  var chosen: [JumpChoice] = []
+  var closes = 0
   func panelChoseDestination() { presses += 1 }
   func panelChoseHistory(_ move: HistoryMove) { moves.append(move) }
+  func panelChoseJump(_ choice: JumpChoice) { chosen.append(choice) }
+  func panelClosedJump() { closes += 1 }
 }

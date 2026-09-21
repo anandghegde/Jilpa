@@ -8,6 +8,10 @@ public enum ManualSource: String, Sendable, Hashable, CaseIterable, LogSafe {
   case quickSearch = "quick-search"
   case hotkey
   case pathEntry = "path-entry"
+  /// A row chosen in the fuzzy jump's field. A path typed into the same field is `pathEntry`:
+  /// the two are worth telling apart, because one is a destination Jilpa offered and the other
+  /// is one the user brought.
+  case fuzzyJump = "fuzzy-jump"
   case automationService = "automation-service"
 }
 
