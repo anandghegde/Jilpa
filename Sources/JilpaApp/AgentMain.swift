@@ -138,6 +138,9 @@ final class DialogAgent {
   /// The recents, read once and shared by the strip, the fuzzy jump and the menu bar (D5). Nil
   /// with no store, and every surface then offers no recents at all.
   private let recents: RecentsCenter?
+  /// Where a dialog's destination comes from (D8). It holds the explicit defaults and the pin,
+  /// and it is the one live caller of `Resolver.resolve`.
+  private let resolutions: ResolutionCenter
   private var tasks: [Task<Void, Never>] = []
 
   /// The counters moved. The menu bar redraws from this; the strip is the presenter's own.
@@ -175,6 +178,11 @@ final class DialogAgent {
     // presenter, so the counter a dialog steps and the pin a menu sets go through one gate.
     recents = store.flatMap { store in uses.map { RecentsCenter.live(store, uses: $0) } }
     presenter.recentsSource = recents
+    // What resolution a dialog gets, and whether Jilpa goes there by itself (D8). Held here
+    // rather than by the presenter for the same reason the recents are: the configuration is
+    // reloaded against it, and a weak reference on the presenter would be the only owner.
+    resolutions = ResolutionCenter(home: config.home)
+    presenter.resolutions = resolutions
     recents?.onChange { [weak self] in self?.onRecentsChange?() }
 
     // The presenter is what knows whether a supported dialog has the focus of the frontmost app,
@@ -214,6 +222,10 @@ final class DialogAgent {
     policy.configChanged(config.model)
     presenter.setFavorites(config.favorites)
     hotkeys.setFavorites(config.favorites)
+    // The defaults and the pin, which are read on the next dialog rather than applied to the one
+    // on screen: a dialog that has already been resolved keeps what it was given, because its one
+    // automatic chance is spent and a folder changing under an open dialog is not an edit's job.
+    resolutions.configChanged(config.model)
   }
 
   /// A favorite chosen outside a dialog surface, which is the menu bar. False when no dialog is
@@ -247,8 +259,10 @@ final class DialogAgent {
     return try? ActivityStore(at: ActivityStore.defaultURL(applicationSupport: base))
   }
 
-  /// The one folder the walking skeleton's one button goes to (WP2). Favorites, recents, rules,
-  /// defaults and prediction all arrive here as a request later; this is the first one.
+  /// The folder the strip's button offers a dialog that nothing named one for (WP2). Favorites,
+  /// recents and the defaults reach the same button as a request of their own; what is left for
+  /// this is a dialog with no default, no rule and no prediction, which WP7's ranked set will
+  /// answer with the folders the app actually uses.
   static let walkingSkeletonDestination =
     FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
     ?? FileManager.default.homeDirectoryForCurrentUser

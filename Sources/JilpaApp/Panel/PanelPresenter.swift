@@ -46,8 +46,17 @@ import JilpaUI
 /// other press. Whether the folder a dialog is in *is* one of them is decided by `FolderKey`,
 /// which is the volume and the file identifier and never two paths compared as strings.
 ///
-/// What the rest of WP6 adds: the recents, the explicit defaults and the ranked set. Here the
-/// suggestion is still one folder, the same one for every dialog.
+/// It holds the recents (WP6, D5), which come from the counters a confirmed dialog steps and are
+/// offered by the strip's menu, the fuzzy jump and the menu bar from one list and one gate.
+///
+/// It is where a dialog's destination is resolved and where an automatic navigation begins (WP6,
+/// D8). A dialog gets one chance, on open: the dialog's own bar decides whether Jilpa may act in
+/// it at all (contract 1), the resolver decides what wins and whether the gate lets it navigate
+/// (contracts 3 and 4), and either way the folder it opened in is the one Return goes back to.
+/// Nothing here substitutes a destination that cannot be reached; it says so (contract 5).
+///
+/// What WP7 adds: the ranked set. Here a dialog with no default of its own still offers one
+/// folder, the same one for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -97,6 +106,16 @@ public final class PanelPresenter: PanelActions {
   /// downstream has to tell the two apart.
   public weak var recentsSource: (any RecentsSource)?
 
+  /// Where a dialog's destination comes from (D8). Weak and optional like the rest: without one
+  /// nothing navigates by itself and the strip's button offers the folder it was built with,
+  /// which is what the tests and the soak run with.
+  public weak var resolutions: (any DialogResolving)?
+
+  /// The dialogs whose one automatic chance has been used. A dialog joins this when it is asked,
+  /// not when it moves: contract 3 gives each dialog one automatic navigation and the ask is the
+  /// chance. It ends with the dialog, as the trail does.
+  private var resolved: Set<DialogSession.ID> = []
+
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
   private var pump: Task<Void, Never>?
@@ -141,6 +160,11 @@ public final class PanelPresenter: PanelActions {
     /// What the button last said about itself, so the strip can be redrawn without asking the
     /// coordinator again.
     var isEnabled = false
+    /// The folder resolution named for this dialog, if it named one (D8). It is the button's
+    /// destination while it is set, so a default that the gate would not let navigate by itself
+    /// is still one press away. Nil is not "nowhere": it is this dialog having no destination of
+    /// its own, and the button then offers the one the presenter was built with.
+    var suggestion: URL?
     /// Everything in force about this dialog. The strip shows the top of it; the rest is still
     /// true underneath and comes back when the top is cleared.
     var line = NoticeLine()
@@ -222,6 +246,7 @@ public final class PanelPresenter: PanelActions {
     shown = nil
     tracker = PanelTracker(style: tracking)
     trails.removeAll()
+    resolved.removeAll()
     if let recorder { Task { await recorder.forgetAll() } }
   }
 
@@ -251,6 +276,10 @@ public final class PanelPresenter: PanelActions {
       noteFocus(dialog.session.snapshot?.focus)
       noteSession(dialog.session)
       apply()
+      // Last, and after the strip has been drawn: the dialog is on screen with its own folder in
+      // it before Jilpa proposes another, and a dialog that turns out to need nothing has cost
+      // the attach nothing.
+      await considerAutomatic(dialog)
 
     case .moved(let id):
       // The dialog's frame changed, or the window a sheet hangs from moved. Nothing is read
@@ -268,6 +297,7 @@ public final class PanelPresenter: PanelActions {
       if shown?.id == id { dismiss(id) }
       latch.forget(id)
       trails[id] = nil
+      resolved.remove(id)
       await recorder?.forget(id)
 
     case .closed(let dialog):
@@ -284,6 +314,7 @@ public final class PanelPresenter: PanelActions {
       latch.forget(dialog.id)
       await recordUse(dialog)
       trails[dialog.id] = nil
+      resolved.remove(dialog.id)
       await recorder?.forget(dialog.id)
     }
   }
@@ -307,7 +338,8 @@ public final class PanelPresenter: PanelActions {
     // press before it still running.
     pending = nil
     guard let shown else { return }
-    pending = Task { await self.move(shown, to: self.destination, trigger: .manual(.panelButton)) }
+    let folder = shown.suggestion ?? destination
+    pending = Task { await self.move(shown, to: folder, trigger: .manual(.panelButton)) }
   }
 
   /// Back, Forward or Return to original folder, pressed on the strip.
@@ -550,23 +582,96 @@ public final class PanelPresenter: PanelActions {
     if favoritesUnread { await readFavoriteKeys() }
   }
 
-  /// Points the strip's one button at another folder. WP6 replaces this outright: the panel
-  /// will show the ranked set and the press will carry which of them was pressed. The notice
-  /// goes with the old destination, because it was about a move to somewhere else.
+  // MARK: - The destination
+
+  /// The one automatic navigation a dialog gets (D8, contracts 1, 3 and 4).
+  ///
+  /// It runs on every reading rather than only the first, because the first reading of a
+  /// collapsed save panel or an unsettled listing names no folder, and a dialog whose folder is
+  /// unknown must not be automated. `AutomaticOpening.hold` answers whether this reading is the
+  /// one, and the dialog is marked as asked whatever comes of it: contract 3 gives a dialog one
+  /// automatic navigation, the asking is the chance, and a resolution that refused or was denied
+  /// must not be tried again on the next reading.
+  ///
+  /// The move goes on `pending` rather than being awaited here. The Navigator stops a move when
+  /// the user types in the middle of it, and what tells it so is the latch mirror, which this
+  /// same pump feeds; awaiting the move here would hold the readings that carry the keystroke.
+  private func considerAutomatic(_ dialog: ObservedDialog) async {
+    guard let resolutions, let target = shown, target.id == dialog.id else { return }
+    guard
+      AutomaticOpening.hold(
+        alreadyResolved: resolved.contains(dialog.id), bar: dialog.session.automationBar,
+        hostIsFrontmost: frontmost() == target.app.pid,
+        hasOriginalFolder: trails[dialog.id]?.history.original != nil) == nil
+    else { return }
+    resolved.insert(dialog.id)
+
+    guard let resolution = await resolutions.resolution(for: dialog), shown?.id == dialog.id
+    else { return }
+    switch resolution.outcome {
+    case .navigate(let destination):
+      let folder = URL(fileURLWithPath: destination.path, isDirectory: true)
+      // Drawn on the button before the move starts, so the strip names where the dialog is going
+      // while it goes, and keeps naming it if the move does not arrive.
+      shown?.suggestion = folder
+      apply()
+      let reason = ResolutionNotices.reason(for: destination.trigger, going: folder.lastPathComponent)
+      pending = Task { [weak self] in
+        await self?.move(
+          target, to: folder, trigger: .automation(destination.trigger), explaining: reason)
+      }
+    // The gate said no to navigating by itself, or nothing passed the confidence gate. The
+    // folder is still what this dialog is for, so the button offers it and says nothing: a
+    // suggestion the user has to press is not an automation to be explained.
+    case .suggestOnly(let destination, _):
+      shown?.suggestion = URL(fileURLWithPath: destination.path, isDirectory: true)
+      apply()
+    // Contract 5: the named destination is not reachable and nothing else takes its place. The
+    // button keeps offering it, because the user may mount the disk and press it.
+    case .refuse(let destination, let reason):
+      let folder = URL(fileURLWithPath: destination.path, isDirectory: true)
+      shown?.suggestion = folder
+      shown?.line.show(ResolutionNotices.notice(for: reason, going: folder.lastPathComponent))
+      apply()
+    // Nothing named a folder for this dialog, or the user got there first. Either way the dialog
+    // keeps its own folder and the strip keeps offering the one it was built with.
+    case .keepNative, .yieldToUser:
+      break
+    }
+  }
+
+  /// Points the strip's one button at another folder, for a dialog that resolution named none
+  /// for. WP7 replaces this outright: the panel will show the ranked set and the press will carry
+  /// which of them was pressed. The notice goes with the old destination, because it was about a
+  /// move to somewhere else.
+  ///
+  /// It drops this dialog's resolved suggestion as well. The caller has named a folder, and a
+  /// button that then went somewhere else would be the one place in the app where what is drawn
+  /// on it is not where it goes.
   public func setDestination(_ url: URL) {
     destination = url
     guard shown != nil else { return }
+    shown?.suggestion = nil
     shown?.line.clear(.unavailable)
     apply()
   }
 
+  /// `reason` is shown only if the move arrives, and is what contract 3 asks of an automatic
+  /// navigation: the folder it went to and why, beside the Return the history already offers.
+  /// A move that did not arrive changed nothing, so it has nothing to explain.
   private func move(
-    _ target: Shown, to folder: URL, trigger: NavigationTrigger, as step: HistoryMove? = nil
+    _ target: Shown, to folder: URL, trigger: NavigationTrigger, as step: HistoryMove? = nil,
+    explaining reason: Notice? = nil
   ) async {
     lastResult = nil
     guard let dialog = await coordinator.dialog(target.id),
       dialog.session.allowsManualNavigation
     else { return }
+    // The dialog as it is now, not as it was when the destination was resolved: contract 1 wants
+    // the identity and the state verified before every automated step, and resolving one took an
+    // await during which the user may have typed. The press of a button is the user, and the
+    // latch does not stand against them, so this asks only of what Jilpa does by itself.
+    if trigger.isAutomatic, dialog.session.automationBar != nil { return }
     let request = NavigationRequest(
       session: target.id, dialog: target.window, descriptor: dialog.session.descriptor,
       target: folder, trigger: trigger)
@@ -621,14 +726,22 @@ public final class PanelPresenter: PanelActions {
     // Whatever the user asks for is theirs, and what Jilpa would have done by itself afterwards
     // is not wanted any more. Noted after the move, not before: the latch keeps the first kind
     // it is given, and a request noted first would mask the user typing in the middle.
-    await coordinator.note(.manualRequest, in: target.id)
+    //
+    // Not for an automatic move: nobody asked for it. The latch is the record of what the user
+    // did in this dialog, and a note here would make every automatic navigation look like their
+    // doing, to the resolver that reads `userActed` and to the outcome that reads the latch. One
+    // automatic navigation per dialog is kept where the chance is spent instead.
+    if !trigger.isAutomatic { await coordinator.note(.manualRequest, in: target.id) }
 
     guard shown?.id == target.id else { return }
     shown?.isEnabled = true
     shown?.line.clear(.working)
     // An arrival is the one thing that settles a recovery notice: the dialog was driven to a
     // folder and read back there, so whatever a previous move left in it is over.
-    if case .arrived = result { shown?.line.clear(.recovery) }
+    if case .arrived = result {
+      shown?.line.clear(.recovery)
+      if let reason { shown?.line.show(reason) }
+    }
     if let notice = NavigationNotices.notice(for: result, going: folder.lastPathComponent) {
       shown?.line.show(notice)
     }
@@ -653,7 +766,7 @@ public final class PanelPresenter: PanelActions {
   private func contents(_ shown: Shown) -> PanelContents {
     let trail = trails[shown.id]
     return PanelContents(
-      destination: destination.lastPathComponent, isEnabled: shown.isEnabled,
+      destination: (shown.suggestion ?? destination).lastPathComponent, isEnabled: shown.isEnabled,
       notice: shown.line.current,
       history: HistoryState(
         back: canMove(.back), forward: canMove(.forward),
@@ -681,7 +794,7 @@ public final class PanelPresenter: PanelActions {
   /// somewhere in the listing themselves.
   private func noteSession(_ session: DialogSession) {
     if case .navigating = session.phase {
-      shown?.line.show(.working, going(to: moving ?? destination))
+      shown?.line.show(.working, going(to: moving ?? shown?.suggestion ?? destination))
     } else {
       shown?.line.clear(.working)
     }
