@@ -9,6 +9,9 @@ public enum ManualSource: String, Sendable, Hashable, CaseIterable, LogSafe {
   /// from a favorite because one is a place the user named and the other is one Jilpa worked
   /// out from what they confirmed, and the correction rate of the two is not the same question.
   case recent
+  /// A folder an open Finder window shows, from a menu or the cycle hotkey (D7). Its own
+  /// source, because the user put that window there and neither named it nor confirmed in it.
+  case finderWindow = "finder-window"
   case quickSearch = "quick-search"
   case hotkey
   case pathEntry = "path-entry"

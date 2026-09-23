@@ -55,7 +55,11 @@ import JilpaUI
 /// (contracts 3 and 4), and either way the folder it opened in is the one Return goes back to.
 /// Nothing here substitutes a destination that cannot be reached; it says so (contract 5).
 ///
-/// What WP7 adds: the ranked set. Here a dialog with no default of its own still offers one
+/// It offers Finder's open windows (WP7, D7): on the strip's own menu, in the fuzzy jump and
+/// through the cycle hotkey, from one reading taken when a dialog opens. Going to one is the
+/// same request to the Navigator as any other press.
+///
+/// What WP7 adds next: the ranked set. Here a dialog with no default of its own still offers one
 /// folder, the same one for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
@@ -110,6 +114,15 @@ public final class PanelPresenter: PanelActions {
   /// nothing navigates by itself and the strip's button offers the folder it was built with,
   /// which is what the tests and the soak run with.
   public weak var resolutions: (any DialogResolving)?
+
+  /// Finder's open windows (D7). Weak and optional like the rest: without one the strip draws no
+  /// windows menu and the cycle hotkey goes nowhere, which is exactly what automation denied
+  /// looks like apart from the line that says so.
+  public weak var finderWindows: (any FinderWindowsSource)?
+
+  /// The window the cycle hotkey last went to in each dialog, so the next press goes to the one
+  /// after it. It ends with the dialog, as the trail does.
+  private var cycled: [DialogSession.ID: Int] = [:]
 
   /// The dialogs whose one automatic chance has been used. A dialog joins this when it is asked,
   /// not when it moves: contract 3 gives each dialog one automatic navigation and the ask is the
@@ -262,6 +275,10 @@ public final class PanelPresenter: PanelActions {
       // takes it away again.
       shown = Shown(id: id, app: app, window: window, descriptor: nil, variant: variant)
       tracker = PanelTracker(style: tracking)
+      // D7 wants the list to match Finder's windows when the dialog opens. The read is Apple
+      // Events on the bridge's own queue and lands after the strip is drawn; the strip is
+      // redrawn when it does.
+      finderWindows?.refresh()
       await reposition()
 
     case .updated(let dialog):
@@ -298,6 +315,7 @@ public final class PanelPresenter: PanelActions {
       latch.forget(id)
       trails[id] = nil
       resolved.remove(id)
+      cycled[id] = nil
       await recorder?.forget(id)
 
     case .closed(let dialog):
@@ -315,6 +333,7 @@ public final class PanelPresenter: PanelActions {
       await recordUse(dialog)
       trails[dialog.id] = nil
       resolved.remove(dialog.id)
+      cycled[dialog.id] = nil
       await recorder?.forget(dialog.id)
     }
   }
@@ -504,6 +523,72 @@ public final class PanelPresenter: PanelActions {
   }
 
   public func panelChoseRecent(_ path: String) { goToRecent(path) }
+
+  // MARK: - Finder windows
+
+  /// The windows a surface over this dialog may offer, already past the gate: a window inside
+  /// an excluded folder is not one. Nothing until the dialog's first reading, like the recents.
+  private func finderWindows(for shown: Shown) -> [FinderWindowPlace] {
+    guard let finderWindows, let policy = shown.policy else { return [] }
+    return finderWindows.windows(policy: policy)
+  }
+
+  /// A new reading of Finder's windows landed. The strip redraws from it; nothing is sent.
+  public func finderWindowsChanged() { apply() }
+
+  /// A Finder window chosen on the strip, in the menu bar or in the fuzzy jump (D7).
+  ///
+  /// The window's folder, named by the path the reading handed out. A window that has closed
+  /// since does not matter: the folder is what was chosen, and a folder that has gone is refused
+  /// with a reason rather than replaced (contract 5).
+  @discardableResult
+  public func goToFinderWindow(_ path: String) -> Bool {
+    pending = nil
+    guard let shown else { return false }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    pending = Task { await self.move(shown, to: url, trigger: .manual(.finderWindow)) }
+    return true
+  }
+
+  public func panelChoseFinderWindow(_ path: String) { goToFinderWindow(path) }
+
+  /// The cycle hotkey (D7). `HotkeyCenter` answers `.cycleWindows` with this.
+  ///
+  /// Finder's windows are read again first: the hotkey goes somewhere the user cannot see
+  /// before it goes, and a list from before they opened or closed a window would send the dialog
+  /// to a folder that is no longer on their screen.
+  public func cycleFinderWindows() {
+    pending = nil
+    guard let target = shown else { return }
+    pending = Task { await self.cycle(target) }
+  }
+
+  private func cycle(_ target: Shown) async {
+    guard let source = finderWindows else { return }
+    await source.refreshed()
+    // The read was a round trip to Finder, and the dialog could have gone meanwhile.
+    guard let shown, shown.id == target.id else { return }
+    let windows = finderWindows(for: shown)
+    guard !windows.isEmpty || source.automation == .granted
+      || source.automation == .finderNotRunning
+    else {
+      if let notice = FinderNotices.unavailable(source.automation) { note(shown.id, notice) }
+      return
+    }
+    // By key, never by path: the window is passed over when it shows the folder the dialog is
+    // already in, and a window whose key was not read is never taken for that folder.
+    let here = trails[shown.id]?.place?.key
+    let skipping = Set(windows.filter { here != nil && $0.key == here }.map(\.number))
+    guard
+      let number = FinderWindowCycle.next(
+        windows.map(\.number), after: cycled[shown.id], skipping: skipping),
+      let window = windows.first(where: { $0.number == number })
+    else { return note(shown.id, FinderNotices.noOtherWindow()) }
+    cycled[shown.id] = number
+    await move(
+      shown, to: URL(fileURLWithPath: window.path, isDirectory: true),
+      trigger: .manual(.finderWindow))
+  }
 
   /// The move the last press started. It is here so the soak can wait for one; the app never
   /// waits, because the press returns to the run loop and the strip updates when the move ends.
@@ -773,7 +858,8 @@ public final class PanelPresenter: PanelActions {
         returnToOriginal: canMove(.returnToOriginal)),
       favorites: favorites, folder: trail?.place?.path,
       favoriteHere: trail?.place?.key.flatMap(favorite(at:)),
-      recents: recents(for: shown, in: appScope(shown), limit: RecentsCenter.menuLimit))
+      recents: recents(for: shown, in: appScope(shown), limit: RecentsCenter.menuLimit),
+      finderWindows: finderWindows(for: shown))
   }
 
   /// Which favorite is this folder, if one of them is. By key, never by path: two paths can
@@ -1213,6 +1299,11 @@ public final class PanelPresenter: PanelActions {
       rows.append(
         JumpRow(
           path: place.path, title: place.name, detail: place.detail, source: .favorite))
+    }
+    // Then Finder's windows, which are folders the user has open on their screen right now.
+    for place in finderWindows(for: target) where !rows.contains(where: { $0.path == place.path }) {
+      rows.append(
+        JumpRow(path: place.path, title: place.name, detail: place.detail, source: .window))
     }
     // Then the recents, globally: the field is not about this app any more than the menu bar
     // is, and a folder the user confirmed anywhere is a folder they may mean here.

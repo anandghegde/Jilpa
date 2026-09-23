@@ -61,5 +61,8 @@ public enum PrivacyDisclosure {
     // The other half of the same question, and under the same gate operation: it is a read of
     // another app's window, so it is disclosed as its own thing.
     DisclosureItem("sensed.documentWindow", .sensed),
+    // Finder's windows are what the user already has open, and private mode does not list them
+    // among the sensing it stops (architecture, Gaps, item 13, which awaits the owner).
+    DisclosureItem("sensed.finderWindows", .sensed, inPrivateMode: .unchanged),
   ]
 }

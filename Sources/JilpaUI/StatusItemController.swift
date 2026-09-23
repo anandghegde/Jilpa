@@ -7,8 +7,7 @@ import AppKit
 import JilpaCore
 
 /// Menu bar presence (S1). It carries the version, Quit, the favorites (D4), the recents with
-/// their pins (D5), private mode and the per-app pause (D18). Open Finder windows need the
-/// Finder bridge and arrive with it (WP7).
+/// their pins (D5), Finder's open windows (D7), private mode and the per-app pause (D18).
 ///
 /// The controller holds no policy. It is told what the favorites and the recents are and
 /// reports which one was chosen; whether that means navigating the dialog in front or opening a
@@ -33,12 +32,20 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   public var onSetPrivateMode: ((Bool) -> Void)?
   /// An app paused (true) or resumed (false) from the menu.
   public var onSetPaused: ((AppID, Bool) -> Void)?
+  /// A Finder window chosen from the menu bar.
+  public var onChooseFinderWindow: ((FinderWindowPlace) -> Void)?
+  /// Show Finder Windows chosen while macOS has not been asked yet. This is the first use of a
+  /// Finder feature, and the one place Jilpa asks macOS to put the question to the user.
+  public var onRequestFinderAccess: (() -> Void)?
 
   private let item: NSStatusItem
   private let menu = NSMenu()
   private let version: String
   private var favorites: [FavoritePlace] = []
   private var recents: [RecentPlace] = []
+  private var finderWindows: [FinderWindowPlace] = []
+  /// Nil while nothing watches dialogs, and then the menu has no windows section at all.
+  private var finderAutomation: FinderAutomation?
   /// Nil while nothing watches dialogs — no Accessibility grant — because a pause or private
   /// mode would then be a switch that changes nothing the user could see.
   private var controls: PrivacyControls?
@@ -70,6 +77,15 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   public func setRecents(_ list: [RecentPlace]) {
     guard list != recents else { return }
     recents = list
+    rebuild()
+  }
+
+  /// Finder's windows as the last reading had them (D7), already past the gate, and what macOS
+  /// said about Finder automation, which decides what the section says when the list is empty.
+  public func setFinderWindows(_ list: [FinderWindowPlace], automation: FinderAutomation?) {
+    guard list != finderWindows || automation != finderAutomation else { return }
+    finderWindows = list
+    finderAutomation = automation
     rebuild()
   }
 
@@ -175,6 +191,8 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       }
     }
 
+    addFinderWindows()
+
     if let controls { addControls(controls) }
 
     menu.addItem(.separator())
@@ -185,6 +203,68 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         keyEquivalent: "q"
       )
     )
+  }
+
+  /// The windows, or the one row that says why there are none (D7). Denied is said and not
+  /// hidden, because a feature that is off without a word looks like one that is broken.
+  private func addFinderWindows() {
+    guard let automation = finderAutomation else { return }
+    let status: NSMenuItem?
+    switch automation {
+    case .notAsked:
+      status = NSMenuItem(
+        title: String(localized: "Show Finder Windows…"),
+        action: #selector(requestFinderAccessPressed), keyEquivalent: "")
+      status?.subtitle = String(localized: "macOS will ask you to allow Jilpa to control Finder")
+    case .denied:
+      status = NSMenuItem(
+        title: String(localized: "Finder Windows Not Allowed"),
+        action: #selector(automationSettingsPressed), keyEquivalent: "")
+      status?.subtitle = String(localized: "Choose to open Privacy & Security, Automation")
+    case .granted, .finderNotRunning, .unavailable:
+      status = nil
+    }
+    guard status != nil || !finderWindows.isEmpty else { return }
+    menu.addItem(.separator())
+    let heading = NSMenuItem(
+      title: String(localized: "Finder Windows"), action: nil, keyEquivalent: "")
+    heading.isEnabled = false
+    menu.addItem(heading)
+    if let status {
+      status.target = self
+      status.indentationLevel = 1
+      status.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+      menu.addItem(status)
+    }
+    for place in finderWindows {
+      let row = NSMenuItem(
+        title: place.name, action: #selector(finderWindowPressed(_:)), keyEquivalent: "")
+      row.target = self
+      row.indentationLevel = 1
+      row.representedObject = place.number
+      row.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+      row.subtitle = place.detail
+      menu.addItem(row)
+    }
+  }
+
+  @objc private func finderWindowPressed(_ sender: NSMenuItem) {
+    guard let number = sender.representedObject as? Int,
+      let place = finderWindows.first(where: { $0.number == number })
+    else { return }
+    onChooseFinderWindow?(place)
+  }
+
+  @objc private func requestFinderAccessPressed() { onRequestFinderAccess?() }
+
+  /// The Automation list in System Settings, where a denial is taken back. Opening it activates
+  /// System Settings and never Jilpa.
+  @objc private func automationSettingsPressed() {
+    guard
+      let url = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+    else { return }
+    NSWorkspace.shared.open(url)
   }
 
   private func addControls(_ controls: PrivacyControls) {

@@ -56,11 +56,16 @@ public struct PanelContents: Sendable, Equatable {
   /// and a non-recording dialog leave this empty, and the strip draws what it is handed rather
   /// than asking a question of its own.
   public var recents: [RecentPlace]
+  /// Finder's open windows that show a folder, front to back (D7). Past the gate like the
+  /// recents, and empty when Finder automation is not allowed: the strip then draws no windows
+  /// menu, and the cycle hotkey is where the reason is said.
+  public var finderWindows: [FinderWindowPlace]
 
   public init(
     destination: String, isEnabled: Bool, notice: Notice? = nil,
     history: HistoryState = HistoryState(), favorites: [FavoritePlace] = [],
-    folder: String? = nil, favoriteHere: FavoriteID? = nil, recents: [RecentPlace] = []
+    folder: String? = nil, favoriteHere: FavoriteID? = nil, recents: [RecentPlace] = [],
+    finderWindows: [FinderWindowPlace] = []
   ) {
     self.destination = destination
     self.isEnabled = isEnabled
@@ -70,6 +75,7 @@ public struct PanelContents: Sendable, Equatable {
     self.folder = folder
     self.favoriteHere = favoriteHere
     self.recents = recents
+    self.finderWindows = finderWindows
   }
 }
 
@@ -97,6 +103,8 @@ public protocol PanelActions: AnyObject {
   /// is what a navigation takes; a folder that has since moved is refused with a reason rather
   /// than replaced (contract 5).
   func panelChoseRecent(_ path: String)
+  /// A Finder window chosen from the strip's windows menu (D7), named by its folder's path.
+  func panelChoseFinderWindow(_ path: String)
 }
 
 /// The strip's one window and its contents (D2).
@@ -172,7 +180,7 @@ public final class PanelHost {
   let noticeZone: NSStackView
   let noticeSymbol: NSImageView
   let notice: NSTextField
-  /// Favorites, recents, and later open Finder windows (D4, D5, D7). One button per menu, as
+  /// Favorites, recents and open Finder windows (D4, D5, D7). One button per menu, as
   /// the wireframe draws them, because each list is about something different and a single
   /// menu of all of them would be the drill-in that is not due yet.
   let menusZone: NSStackView
@@ -181,6 +189,8 @@ public final class PanelHost {
   let favoritesIcon: StripButton
   let recentsButton: StripButton
   let recentsIcon: StripButton
+  let windowsButton: StripButton
+  let windowsIcon: StripButton
   /// The fuzzy jump, in the same window as the zones and never up at the same time.
   let jump: JumpView
 
@@ -273,8 +283,20 @@ public final class PanelHost {
     recentsButton.setContentCompressionResistancePriority(.required, for: .horizontal)
     recentsButton.setContentHuggingPriority(.required, for: .horizontal)
     recentsIcon = Self.iconButton(symbol: "clock")
+    windowsButton = StripButton()
+    windowsButton.bezelStyle = .accessoryBar
+    windowsButton.setButtonType(.momentaryPushIn)
+    windowsButton.title = String(localized: "Windows")
+    windowsButton.image = NSImage(
+      systemSymbolName: "macwindow.on.rectangle", accessibilityDescription: nil)
+    windowsButton.imagePosition = .imageLeading
+    windowsButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+    windowsButton.setContentHuggingPriority(.required, for: .horizontal)
+    windowsIcon = Self.iconButton(symbol: "macwindow.on.rectangle")
     menusZone = NSStackView(
-      views: [favoritesButton, favoritesIcon, recentsButton, recentsIcon])
+      views: [
+        favoritesButton, favoritesIcon, recentsButton, recentsIcon, windowsButton, windowsIcon,
+      ])
     menusZone.spacing = Self.controlSpacing
 
     zones = NSStackView(views: [historyZone, suggestionZone, noticeZone, menusZone])
@@ -323,6 +345,12 @@ public final class PanelHost {
       control.action = #selector(recentsPressed)
       control.setAccessibilityLabel(String(localized: "Recent folders"))
       control.toolTip = String(localized: "Recent folders")
+    }
+    for control in [windowsButton, windowsIcon] {
+      control.target = self
+      control.action = #selector(windowsPressed)
+      control.setAccessibilityLabel(String(localized: "Finder windows"))
+      control.toolTip = String(localized: "Finder windows")
     }
 
     // Reduce Transparency and Increase Contrast can both be turned on while a dialog is open.
@@ -559,19 +587,22 @@ public final class PanelHost {
       var full: CGFloat = 0
       if menus.favorites { full += width(favoritesButton) }
       if menus.recents { full += width(recentsButton) }
-      if menus.both { full += Self.controlSpacing }
+      if menus.windows { full += width(windowsButton) }
+      full += CGFloat(menus.count - 1) * Self.controlSpacing
+      // Compact is every offered menu as its icon alone.
+      let icons = Self.controlLength + CGFloat(menus.count - 1) * step
       // A vertical strip is `thickness` points across, which is room for a symbol and not for a
-      // word, so both menus offer only their icons there — stacked while there is length for
-      // two, and one of them when there is not.
+      // word, so the menus offer only their icons there — stacked while there is length for
+      // all of them, and one of them when there is not.
       demands.append(
         horizontal
           ? ZoneDemand(
-            zone: .menus, full: full, compact: menus.both ? Self.controlLength + step : nil,
+            zone: .menus, full: full, compact: menus.count > 1 ? icons : nil,
             icon: Self.controlLength)
           : ZoneDemand(
             zone: .menus,
-            lengths: menus.both
-              ? [.compact: Self.controlLength + step, .icon: Self.controlLength]
+            lengths: menus.count > 1
+              ? [.compact: icons, .icon: Self.controlLength]
               : [.icon: Self.controlLength]))
     }
 
@@ -615,6 +646,12 @@ public final class PanelHost {
     // there are no favorites at all does the smallest drawing of the zone belong to them.
     recentsIcon.isHidden = !(offer.recents
       && (menus == .compact || (menus == .icon && !offer.favorites)))
+    // The windows go before the recents: they are in the menu bar, in the fuzzy jump and on
+    // their own hotkey, and the smallest drawing of the zone is theirs only when nothing else
+    // is offered.
+    windowsButton.isHidden = !(offer.windows && menus == .full)
+    windowsIcon.isHidden = !(offer.windows
+      && (menus == .compact || (menus == .icon && !offer.favorites && !offer.recents)))
   }
 
   /// What the menus zone has to offer right now, which decides both what it asks for and what
@@ -622,8 +659,9 @@ public final class PanelHost {
   private struct MenusOffer {
     var favorites = false
     var recents = false
-    var any: Bool { favorites || recents }
-    var both: Bool { favorites && recents }
+    var windows = false
+    var count: Int { [favorites, recents, windows].filter { $0 }.count }
+    var any: Bool { count > 0 }
   }
 
   private var menusOffer: MenusOffer {
@@ -632,7 +670,7 @@ public final class PanelHost {
     // it. The recents offer nothing when there are none, and then the clock is not drawn.
     return MenusOffer(
       favorites: !contents.favorites.isEmpty || contents.folder != nil,
-      recents: !contents.recents.isEmpty)
+      recents: !contents.recents.isEmpty, windows: !contents.finderWindows.isEmpty)
   }
 
   /// The strip is never key, so VoiceOver does not follow a change in it by itself. A notice
@@ -768,6 +806,37 @@ public final class PanelHost {
       menu.addItem(item)
     }
     return menu
+  }
+
+  /// Pops the Finder windows menu under whichever of the two was pressed (D7). Built and thrown
+  /// away like the other two, for the same reason.
+  @objc private func windowsPressed(_ sender: NSView) {
+    guard let menu = windowsMenu() else { return }
+    let corner = side == .above ? NSPoint(x: 0, y: 0) : NSPoint(x: 0, y: sender.bounds.height)
+    menu.popUp(positioning: nil, at: corner, in: sender)
+  }
+
+  /// The windows menu as it stands right now: each window by its folder's name, front to back,
+  /// with the folder it is in underneath. Nil when there are none.
+  func windowsMenu() -> NSMenu? {
+    guard let contents, !contents.finderWindows.isEmpty else { return nil }
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    for place in contents.finderWindows {
+      let item = NSMenuItem(
+        title: place.name, action: #selector(windowPressed(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = place.path
+      item.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+      item.subtitle = place.detail
+      menu.addItem(item)
+    }
+    return menu
+  }
+
+  @objc private func windowPressed(_ sender: NSMenuItem) {
+    guard let path = sender.representedObject as? String else { return }
+    actions?.panelChoseFinderWindow(path)
   }
 
   @objc private func recentPressed(_ sender: NSMenuItem) {

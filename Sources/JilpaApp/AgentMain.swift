@@ -67,7 +67,12 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
       // Which app is in front is read as the menu opens too: the pause row is about that app,
       // and the menu bar takes no key status, so it is still the one the user was in.
       self?.statusItem?.setControls(self?.agent?.menuControls())
+      // Finder's windows as last read, and a new read that redraws the open menu when it lands.
+      self?.showFinderWindows()
+      self?.agent?.refreshFinderWindows()
     }
+    statusItem.onChooseFinderWindow = { [weak self] place in self?.chose(place) }
+    statusItem.onRequestFinderAccess = { [weak self] in self?.agent?.requestFinderAccess() }
     statusItem.onSetPrivateMode = { [weak self] on in self?.agent?.setPrivateMode(on) }
     statusItem.onSetPaused = { [weak self] app, paused in self?.agent?.setPaused(paused, app) }
     // One listener for the whole fan-out, so the surfaces cannot disagree about the order they
@@ -93,8 +98,15 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     agent.onControlsChange = { [weak self] in
       self?.statusItem?.setControls(self?.agent?.menuControls())
     }
+    agent.onFinderWindowsChange = { [weak self] in self?.showFinderWindows() }
     statusItem.setControls(agent.menuControls())
     agent.start()
+  }
+
+  private func showFinderWindows() {
+    guard let agent else { return }
+    let (windows, automation) = agent.menuFinderWindows()
+    statusItem?.setFinderWindows(windows, automation: automation)
   }
 
   /// A favorite chosen in the menu bar. It navigates the dialog under the strip when there is
@@ -110,6 +122,13 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   /// A recent chosen in the menu bar, which does the same two jobs as a favorite (D5, S1).
   private func chose(_ place: RecentPlace) {
     guard agent?.goToRecent(place.path) != true else { return }
+    NSWorkspace.shared.open(URL(fileURLWithPath: place.path, isDirectory: true))
+  }
+
+  /// A Finder window chosen in the menu bar, which does the same two jobs again (D7, S1): the
+  /// dialog under the strip goes to its folder, or with no dialog Finder shows that folder.
+  private func chose(_ place: FinderWindowPlace) {
+    guard agent?.goToFinderWindow(place.path) != true else { return }
     NSWorkspace.shared.open(URL(fileURLWithPath: place.path, isDirectory: true))
   }
 
@@ -151,12 +170,17 @@ final class DialogAgent {
   /// Where a dialog's destination comes from (D8). It holds the explicit defaults and the pin,
   /// and it is the one live caller of `Resolver.resolve`.
   private let resolutions: ResolutionCenter
+  /// Finder's open windows (D7), read when a dialog opens and when the menu bar opens, and
+  /// shared by the strip, the fuzzy jump, the cycle hotkey and the menu bar.
+  private let finders = FinderWindowsCenter.live()
   private var tasks: [Task<Void, Never>] = []
 
   /// The counters moved. The menu bar redraws from this; the strip is the presenter's own.
   var onRecentsChange: (() -> Void)?
   /// Private mode or a pause moved, from the menu, the hotkey or an edit to the files.
   var onControlsChange: (() -> Void)?
+  /// A new reading of Finder's windows, or of whether Jilpa may read them.
+  var onFinderWindowsChange: (() -> Void)?
 
   init(config: ConfigCenter) {
     let compat = CompatSource.live()
@@ -196,12 +220,17 @@ final class DialogAgent {
     resolutions = ResolutionCenter(home: config.home)
     presenter.resolutions = resolutions
     recents?.onChange { [weak self] in self?.onRecentsChange?() }
+    presenter.finderWindows = finders
+    finders.onChange { [weak self] in
+      self?.presenter.finderWindowsChanged()
+      self?.onFinderWindowsChange?()
+    }
 
     // The presenter is what knows whether a supported dialog has the focus of the frontmost app,
     // which is the whole of contract 2's condition for a dialog chord.
     presenter.hotkeys = hotkeys
-    // The three history controls and fuzzy jump, which are the four actions WP5 ships an answer
-    // for. Everything else in the table is answered by nothing yet and so registered for
+    // The three history controls, fuzzy jump and the Finder window cycle, which are the actions
+    // WP5 and WP7 ship an answer for. Everything else in the table is answered by nothing yet and so registered for
     // nothing: a chord held for an action that does nothing is a key taken from every other app
     // for nothing.
     let presenter = self.presenter
@@ -212,6 +241,9 @@ final class DialogAgent {
     }
     // The one chord that takes key status, and the only focus change Jilpa initiates (D11).
     hotkeys.answer(.fuzzyJump) { [weak presenter] in presenter?.openJump() }
+    // Each Finder window in turn (D7). A dialog chord like the others, so it is held only while
+    // a supported dialog has the keys.
+    hotkeys.answer(.cycleWindows) { [weak presenter] in presenter?.cycleFinderWindows() }
     // A favorite's chord is a dialog chord like the rest, and it does exactly what pressing the
     // favorite on the strip does (D4).
     hotkeys.answerFavorites { [weak presenter] id in presenter?.goToFavorite(id) }
@@ -296,6 +328,22 @@ final class DialogAgent {
     }
   }
 
+  /// Finder's windows as the menu bar shows them, gated as a menu about no dialog is, and what
+  /// macOS said about Finder automation.
+  func menuFinderWindows() -> ([FinderWindowPlace], FinderAutomation?) {
+    (finders.windows(policy: policy.menuPolicy), finders.automation)
+  }
+
+  func refreshFinderWindows() { finders.refresh() }
+
+  /// Show Finder Windows, chosen in the menu bar: macOS asks the user, and the list follows.
+  func requestFinderAccess() {
+    Task { await finders.requestAccess() }
+  }
+
+  /// The same for a Finder window's folder (D7).
+  func goToFinderWindow(_ path: String) -> Bool { presenter.goToFinderWindow(path) }
+
   /// What the menu bar offers now: the global list, gated as a menu about no dialog is.
   func menuRecents() -> [RecentPlace] {
     recents?.recents(
@@ -351,6 +399,9 @@ final class DialogAgent {
     ]
     presenter.start()
     apps.start()
+    // The first read, so the menu knows whether to offer the windows or to say why not. It asks
+    // macOS without prompting and sends Finder nothing unless consent already exists.
+    finders.refresh()
   }
 
   func stop() {

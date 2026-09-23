@@ -332,6 +332,68 @@ struct PanelHostTests {
     #expect(listener.recents == ["/Users/ada/Work/Scans", "/Users/ada/Archive"])
   }
 
+  // MARK: - The Finder windows menu
+
+  /// The windows are a third menu, drawn only when Finder has a window with a folder to offer.
+  @Test func theWindowsMenuIsDrawnOnlyWhenThereAreWindows() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(destination: "Invoices", isEnabled: true, favorites: [invoices]),
+      at: placement(.below))
+    #expect(host.windowsButton.isHidden && host.windowsIcon.isHidden)
+    #expect(host.windowsMenu() == nil)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans],
+        finderWindows: [documents]))
+    #expect(host.details[.menus] == .full)
+    #expect(!host.favoritesButton.isHidden && !host.recentsButton.isHidden)
+    #expect(!host.windowsButton.isHidden)
+  }
+
+  /// Down the side of a dialog the windows are the first icon the zone gives up, and with
+  /// nothing else to offer they are the one icon left.
+  @Test func theSmallestZoneGivesUpTheWindowsFirst() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans],
+        finderWindows: [documents]),
+      at: placement(.right, length: 180))
+    #expect(host.details[.menus] == .icon)
+    #expect(!host.favoritesIcon.isHidden)
+    #expect(host.recentsIcon.isHidden && host.windowsIcon.isHidden)
+
+    let alone = PanelHost()
+    alone.show(
+      PanelContents(destination: "Invoices", isEnabled: true, finderWindows: [documents]),
+      at: placement(.right, length: 400))
+    #expect(alone.details[.menus] == .icon)
+    #expect(!alone.windowsIcon.isHidden)
+  }
+
+  /// Front to back, each by its folder's name with where the folder is underneath, and each
+  /// reports its folder's path and navigates nothing itself.
+  @Test func eachWindowReportsItsFolder() {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true, finderWindows: [documents, desktop]),
+      at: placement(.below))
+    let menu = host.windowsMenu()!
+    #expect(menu.items.map(\.title) == ["Documents", "Desktop"])
+    #expect(menu.items.map(\.subtitle) == ["/Users/ada", "/Users/ada"])
+    #expect(menu.items.allSatisfy { $0.keyEquivalent.isEmpty })
+    press(menu.items[1])
+    #expect(listener.windows == ["/Users/ada/Desktop"])
+  }
+
+  private let documents = FinderWindowPlace(number: 5178, path: "/Users/ada/Documents")
+  private let desktop = FinderWindowPlace(number: 43, path: "/Users/ada/Desktop")
+
   private let scans = RecentPlace(path: "/Users/ada/Work/Scans", name: "Scans")
   private let otherScans = RecentPlace(path: "/Volumes/Scanner/Scans", name: "Scans")
   private let pinned = RecentPlace(path: "/Users/ada/Archive", name: "Archive", pinned: true)
@@ -807,4 +869,6 @@ private final class Listener: PanelActions {
   func panelChoseAddFavorite() { added += 1 }
   func panelChoseRemoveFavorite(_ id: FavoriteID) { removed.append(id) }
   func panelChoseRecent(_ path: String) { recents.append(path) }
+  var windows: [String] = []
+  func panelChoseFinderWindow(_ path: String) { windows.append(path) }
 }
