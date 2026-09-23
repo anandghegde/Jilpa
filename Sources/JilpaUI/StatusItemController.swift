@@ -6,8 +6,9 @@
 import AppKit
 import JilpaCore
 
-/// Menu bar presence (S1). It carries the version, Quit, the favorites (D4) and the recents
-/// with their pins (D5); open Finder windows, pause and private mode land with the rest of WP6.
+/// Menu bar presence (S1). It carries the version, Quit, the favorites (D4), the recents with
+/// their pins (D5), private mode and the per-app pause (D18). Open Finder windows need the
+/// Finder bridge and arrive with it (WP7).
 ///
 /// The controller holds no policy. It is told what the favorites and the recents are and
 /// reports which one was chosen; whether that means navigating the dialog in front or opening a
@@ -28,22 +29,26 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   /// now — freshly gated, because private mode may have moved since the menu was last built and
   /// a list held from then would be one the gate has already withdrawn.
   public var onMenuOpen: (() -> Void)?
+  /// Private mode switched from the menu, to the value the user asked for.
+  public var onSetPrivateMode: ((Bool) -> Void)?
+  /// An app paused (true) or resumed (false) from the menu.
+  public var onSetPaused: ((AppID, Bool) -> Void)?
 
   private let item: NSStatusItem
   private let menu = NSMenu()
   private let version: String
   private var favorites: [FavoritePlace] = []
   private var recents: [RecentPlace] = []
+  /// Nil while nothing watches dialogs — no Accessibility grant — because a pause or private
+  /// mode would then be a switch that changes nothing the user could see.
+  private var controls: PrivacyControls?
 
   public init(version: String) {
     self.version = version
     item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     super.init()
-    item.button?.image = NSImage(
-      systemSymbolName: "folder.badge.gearshape",
-      accessibilityDescription: String(localized: "Jilpa")
-    )
     menu.delegate = self
+    drawButton()
     rebuild()
     item.menu = menu
   }
@@ -68,12 +73,36 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     rebuild()
   }
 
+  /// Private mode and the pauses as the gate now has them (S1, D18). Given, like the lists: the
+  /// state is the policy centre's, and this menu only shows it and reports the click.
+  public func setControls(_ controls: PrivacyControls?) {
+    guard controls != self.controls else { return }
+    self.controls = controls
+    drawButton()
+    rebuild()
+  }
+
   /// A menu about to open is rebuilt anyway, so a change that arrived while the menu bar was
   /// being clicked cannot be a click on a stale row. The app is asked first: the recents it
   /// hands back are then the ones this opening shows.
   public func menuNeedsUpdate(_ menu: NSMenu) {
     onMenuOpen?()
     rebuild()
+  }
+
+  /// Private mode shows on the menu bar itself, not only inside the menu: it changes what Jilpa
+  /// remembers, and a mode the user has forgotten is on is one that quietly records nothing.
+  private func drawButton() {
+    let on = controls?.privateMode == true
+    let symbol = on ? "folder.badge.minus" : "folder.badge.gearshape"
+    item.button?.image =
+      NSImage(
+        systemSymbolName: symbol,
+        accessibilityDescription: on
+          ? String(localized: "Jilpa, private mode on") : String(localized: "Jilpa"))
+      ?? NSImage(
+        systemSymbolName: "folder.badge.gearshape",
+        accessibilityDescription: String(localized: "Jilpa"))
   }
 
   private func rebuild() {
@@ -146,6 +175,8 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       }
     }
 
+    if let controls { addControls(controls) }
+
     menu.addItem(.separator())
     menu.addItem(
       NSMenuItem(
@@ -154,6 +185,78 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         keyEquivalent: "q"
       )
     )
+  }
+
+  private func addControls(_ controls: PrivacyControls) {
+    menu.addItem(.separator())
+    let privateMode = NSMenuItem(
+      title: String(localized: "Private Mode"), action: #selector(privateModePressed(_:)),
+      keyEquivalent: "")
+    privateMode.target = self
+    privateMode.state = controls.privateMode ? .on : .off
+    privateMode.image = NSImage(systemSymbolName: "eye.slash", accessibilityDescription: nil)
+    // What it does, in the row, because the name alone does not say that the panel and the
+    // favorites stay: private mode stops the remembering, not the helping.
+    privateMode.subtitle = String(localized: "Nothing is recorded or learned")
+    menu.addItem(privateMode)
+
+    if let front = controls.front {
+      menu.addItem(pauseRow(front, title: front.paused
+        ? String(localized: "Resume Jilpa in \(front.name)")
+        : String(localized: "Pause Jilpa in \(front.name)")))
+    }
+
+    // Every pause, in a submenu of its own, because a paused app has no strip and is often not
+    // in front: without this list a pause could only be taken back by editing a file.
+    guard !controls.paused.isEmpty else { return }
+    let list = NSMenu()
+    for app in controls.paused {
+      list.addItem(pauseRow(app, title: app.name))
+    }
+    let heading = NSMenuItem(
+      title: String(localized: "Paused Apps"), action: nil, keyEquivalent: "")
+    heading.submenu = list
+    menu.addItem(heading)
+  }
+
+  /// One row that pauses or resumes an app. A pause written by hand is shown and not offered:
+  /// Jilpa never writes `config.toml`, so the row says where it can be taken back instead.
+  private func pauseRow(_ app: PrivacyControls.App, title: String) -> NSMenuItem {
+    let row = NSMenuItem(title: title, action: #selector(pausePressed(_:)), keyEquivalent: "")
+    row.target = self
+    row.representedObject = app.id.bundleIdentifier
+    row.image = NSImage(
+      systemSymbolName: app.paused ? "play.circle" : "pause.circle", accessibilityDescription: nil)
+    if app.paused {
+      if app.canResume {
+        row.subtitle = String(localized: "Paused. Choose to resume")
+      } else {
+        row.subtitle = String(localized: "Paused in config.toml")
+        row.action = nil
+        row.isEnabled = false
+      }
+    }
+    return row
+  }
+
+  @objc private func privateModePressed(_ sender: NSMenuItem) {
+    guard let controls else { return }
+    onSetPrivateMode?(!controls.privateMode)
+  }
+
+  /// Which way the switch goes is read from the state the menu was built from, not from the
+  /// row, so a row that outlived a rebuild cannot pause an app that has since been resumed.
+  @objc private func pausePressed(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let controls else { return }
+    let id = AppID(raw)
+    let app = controls.front?.id == id ? controls.front : controls.paused.first { $0.id == id }
+    guard let app else { return }
+    if app.paused {
+      guard app.canResume else { return }
+      onSetPaused?(id, false)
+    } else {
+      onSetPaused?(id, true)
+    }
   }
 
   @objc private func favoritePressed(_ sender: NSMenuItem) {

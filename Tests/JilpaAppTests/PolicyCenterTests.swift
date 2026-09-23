@@ -79,6 +79,21 @@ struct PolicyCenterTests {
     #expect(center.isPaused("com.example.hand"))
   }
 
+  /// S1: the menu's switches are the gate's state, including which pauses it may take back.
+  @Test("the menu's controls are the state, with the pauses the UI may take back")
+  func menuControls() throws {
+    let center = PolicyCenter()
+    center.configChanged(
+      model(paused: [("com.example.hand", .handOwned), ("com.example.ui", .managed)]))
+    center.setPrivateMode(true)
+    let controls = center.controls(
+      front: (AppID("com.example.ui"), "UI"), names: [AppID("com.example.hand"): "Hand"])
+    #expect(controls.privateMode)
+    #expect(controls.front?.paused == true && controls.front?.canResume == true)
+    let hand = try #require(controls.paused.first { $0.name == "Hand" })
+    #expect(!hand.canResume)
+  }
+
   @Test("every change notifies each listener once, and an unchanged state notifies not at all")
   func notifications() {
     let counter = Counter()

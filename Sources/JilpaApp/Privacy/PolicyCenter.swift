@@ -60,6 +60,18 @@ public final class PolicyCenter: @unchecked Sendable {
     return pauseOrigins[app] == .managed
   }
 
+  /// What the menu bar shows for private mode and the pauses (S1, D18), from one read of the
+  /// state so the switches and the gate cannot be a change apart.
+  public func controls(front: (id: AppID, name: String)?, names: [AppID: String])
+    -> PrivacyControls
+  {
+    lock.lock()
+    let state = current
+    let resumable = Set(pauseOrigins.filter { $0.value == .managed }.keys)
+    lock.unlock()
+    return PrivacyControls(state: state, resumable: resumable, front: front, names: names)
+  }
+
   // MARK: - What the pipeline asks
 
   /// The watcher's one closure. An app the gate refuses gets no observer, which is how a pause

@@ -64,7 +64,12 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     // again each time, because private mode may have moved since the last one (S1, contract 7).
     statusItem.onMenuOpen = { [weak self] in
       self?.statusItem?.setRecents(self?.agent?.menuRecents() ?? [])
+      // Which app is in front is read as the menu opens too: the pause row is about that app,
+      // and the menu bar takes no key status, so it is still the one the user was in.
+      self?.statusItem?.setControls(self?.agent?.menuControls())
     }
+    statusItem.onSetPrivateMode = { [weak self] on in self?.agent?.setPrivateMode(on) }
+    statusItem.onSetPaused = { [weak self] app, paused in self?.agent?.setPaused(paused, app) }
     // One listener for the whole fan-out, so the surfaces cannot disagree about the order they
     // were told in. The agent may not exist; the menu bar always does.
     config.onChange { [weak self] change in
@@ -84,6 +89,11 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     agent.onRecentsChange = { [weak self] in
       self?.statusItem?.setRecents(self?.agent?.menuRecents() ?? [])
     }
+    // The same for private mode and the pauses, which also redraw the menu bar's own icon.
+    agent.onControlsChange = { [weak self] in
+      self?.statusItem?.setControls(self?.agent?.menuControls())
+    }
+    statusItem.setControls(agent.menuControls())
     agent.start()
   }
 
@@ -145,6 +155,8 @@ final class DialogAgent {
 
   /// The counters moved. The menu bar redraws from this; the strip is the presenter's own.
   var onRecentsChange: (() -> Void)?
+  /// Private mode or a pause moved, from the menu, the hotkey or an edit to the files.
+  var onControlsChange: (() -> Void)?
 
   init(config: ConfigCenter) {
     let compat = CompatSource.live()
@@ -203,6 +215,12 @@ final class DialogAgent {
     // A favorite's chord is a dialog chord like the rest, and it does exactly what pressing the
     // favorite on the strip does (D4).
     hotkeys.answerFavorites { [weak presenter] id in presenter?.goToFavorite(id) }
+    // A global chord, and one with no default: nothing is registered until the user binds one,
+    // and then it does what the menu's row does.
+    hotkeys.answer(.privateMode) { [weak self] in
+      guard let self else { return }
+      self.setPrivateMode(!self.policy.state.privateMode)
+    }
 
     // Where a favorite is added and removed. Weak on the presenter: the centre outlives the
     // agent, and an agent that has stopped must not keep it alive.
@@ -239,6 +257,43 @@ final class DialogAgent {
   /// was drawn under, so what the user could see is what they can pin.
   func setPinned(_ pinned: Bool, at path: String) {
     recents?.setPinned(pinned, at: path, policy: policy.menuPolicy)
+  }
+
+  /// Private mode and the pauses as the menu bar shows them (S1, D18). The app in front is the
+  /// one a pause row is about; Jilpa itself, an app that is not a regular one and an app with
+  /// no bundle identifier get no row, because none of them has a pause to write down.
+  func menuControls() -> PrivacyControls {
+    let workspace = NSWorkspace.shared
+    let own = ProcessInfo.processInfo.processIdentifier
+    var names: [AppID: String] = [:]
+    for app in workspace.runningApplications where app.activationPolicy == .regular {
+      guard let bundle = app.bundleIdentifier, let name = app.localizedName else { continue }
+      names[AppID(bundle)] = name
+    }
+    var front: (id: AppID, name: String)?
+    if let app = workspace.frontmostApplication, app.processIdentifier != own,
+      app.activationPolicy == .regular, let bundle = app.bundleIdentifier
+    {
+      front = (AppID(bundle), app.localizedName ?? bundle)
+    }
+    return policy.controls(front: front, names: names)
+  }
+
+  /// Private mode from the menu or its chord. Not written down: it is about what is in front of
+  /// the user now, and a relaunch starts outside it (PolicyCenter).
+  func setPrivateMode(_ on: Bool) {
+    policy.setPrivateMode(on)
+  }
+
+  /// A pause from the menu (D18). The file is written before the state moves, so a write that
+  /// failed leaves the app as it was, and the menu, rebuilt from the state, says so the next
+  /// time it opens. The health view that explains why is WP9's.
+  func setPaused(_ paused: Bool, _ app: AppID) {
+    if paused {
+      try? policy.pause(app)
+    } else {
+      try? policy.resume(app)
+    }
   }
 
   /// What the menu bar offers now: the global list, gated as a menu about no dialog is.
@@ -280,6 +335,7 @@ final class DialogAgent {
         // get them back: the cache is only ever as private as the state it was filled under.
         guard let self else { return }
         self.recents?.refresh(self.policy.state)
+        self.onControlsChange?()
       }
     }
     tasks = [
