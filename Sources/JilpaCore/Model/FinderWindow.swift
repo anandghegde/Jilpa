@@ -94,6 +94,11 @@ public enum FinderWindowColumns {
   }
 }
 
+extension EvidenceSource {
+  /// The front Finder window the dialog may see, as a ranking signal (N1).
+  public static let finderWindow: EvidenceSource = "finder.front-window"
+}
+
 /// One Finder window as the menus, the strip and the fuzzy jump offer it (D7). Only a window
 /// that shows a folder becomes one: Recents, AirDrop, a search or the Trash name no folder to
 /// go to, and Jilpa reads no window title to call them by.

@@ -248,13 +248,16 @@ final class DialogAgent {
         userActive: { latch.isActive($0) }),
       latch: latch, pool: pool, host: host, destination: Self.walkingSkeletonDestination,
       recorder: store.map { NavigationRecorder.live($0) },
-      uses: uses)
+      uses: uses, sessions: store.map { SessionRecorder.live($0) })
 
-    // The recents come from the same counters the ranker will read in WP7: one record of what
-    // was used, and no surface with a list of its own. The recorder is shared with the
-    // presenter, so the counter a dialog steps and the pin a menu sets go through one gate.
+    // The recents come from the same counters the ranker reads: one record of what was used,
+    // and no surface with a list of its own. The recorder is shared with the presenter, so the
+    // counter a dialog steps and the pin a menu sets go through one gate.
     recents = store.flatMap { store in uses.map { RecentsCenter.live(store, uses: $0) } }
     presenter.recentsSource = recents
+    // The ranker reads the same cache (N1): a dialog is ranked on its first reading and that
+    // answer is its shadow ranking, written with its session row when it ends.
+    presenter.suggestions = recents
     // What resolution a dialog gets, and whether Jilpa goes there by itself (D8). Held here
     // rather than by the presenter for the same reason the recents are: the configuration is
     // reloaded against it, and a weak reference on the presenter would be the only owner.

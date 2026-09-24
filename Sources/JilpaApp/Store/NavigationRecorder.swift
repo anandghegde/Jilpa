@@ -93,7 +93,7 @@ public actor NavigationRecorder {
   /// Only dialogs that have had an attempt are followed: a folder nobody automated cannot
   /// correct anything, and a dialog Jilpa never moved keeps nothing here.
   public func visited(_ location: LocationRef, in id: DialogSession.ID, _ context: GateContext) async {
-    guard var dialog = dialogs[id] else { return }
+    guard var dialog = dialogs[id], dialog.attempts > 0 else { return }
     // The same place twice is standing still, whatever path names it. An arrival records its
     // own visit, so this is also what keeps the reading that follows one from doubling it.
     if let last = dialog.visits.last, last.location.isSamePlace(as: location) { return }
@@ -107,6 +107,16 @@ public actor NavigationRecorder {
       record.corrected = true
       await put(record, in: id, context)
     }
+  }
+
+  /// The store's name for one dialog: the one its attempt rows carry, so the session row written
+  /// when it ends joins them. A dialog with no attempt yet is given its name now, and nothing
+  /// else: it is followed only once a move has been tried in it.
+  public func session(of id: DialogSession.ID) -> SessionID {
+    if let dialog = dialogs[id] { return dialog.session }
+    let dialog = Dialog()
+    dialogs[id] = dialog
+    return dialog.session
   }
 
   /// The dialog is over. Its visits and its rows are done with; what is in the store stays.

@@ -31,6 +31,10 @@ public protocol PinSource: AnyObject {
   func offer(folders: [PinnableFolder]) -> PinOffer
   func pin(_ choice: PinChoice, for duration: PinDuration) throws(ConfigEditError)
   func release() throws(ConfigEditError)
+  /// The folder the pin in force stands for, named as the pin names it: the ad hoc folder
+  /// itself, or the pinned context's root. Nil with nothing pinned, and for a context the files
+  /// give no root. The ranker takes it as the active context's scope (N1).
+  var pinnedFolder: PinnableFolder? { get }
 }
 
 /// The pin, live (N4): what is pinned, until when, and the one timer that ends it on time.
@@ -148,6 +152,17 @@ public final class PinCenter: PinSource {
     return PinOffer(
       current: current, remaining: current.flatMap { PinRemaining.at(now(), expiry: $0.expiry) },
       contexts: model.contextRefs, folders: folders)
+  }
+
+  public var pinnedFolder: PinnableFolder? {
+    guard let (choice, _) = live else { return nil }
+    switch choice {
+    case .folder(let path):
+      return PinnableFolder(path: path)
+    case .context(let id):
+      guard let context = model.context(id), let root = context.root else { return nil }
+      return PinnableFolder(path: root.expanded(home: home), name: context.name)
+    }
   }
 
   /// What the chord does now, given the folder of the dialog under the strip if there is one.

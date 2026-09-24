@@ -183,6 +183,30 @@ struct NavigationRecorderTests {
     #expect(rows[1].session != first)
   }
 
+  @Test("the session row and the attempt rows of one dialog carry one name")
+  func sharedName() async throws {
+    let ledger = Ledger()
+    let recorder = recorder(ledger)
+    // Named before any move, as a dialog that is ranked on its first reading is.
+    let named = await recorder.session(of: dialogOne)
+    #expect(await recorder.session(of: dialogOne) == named)
+    // A name is not an attempt: the dialog is still not followed.
+    await recorder.visited(work, in: dialogOne, normal)
+    #expect(await ledger.rows.isEmpty)
+
+    await recorder.record(
+      arrived("/work/a"), in: dialogOne, app: editor, trigger: .manual(.panelButton),
+      strategy: nil, target: work, latency: .milliseconds(1), normal)
+    let row = try #require(await ledger.rows.first)
+    #expect(row.session == named)
+    #expect(row.seq == 1)
+    #expect(await recorder.session(of: dialogOne) == named)
+    #expect(await recorder.session(of: dialogTwo) != named)
+
+    await recorder.forget(dialogOne)
+    #expect(await recorder.session(of: dialogOne) != named)
+  }
+
   @Test("the gate decides every row, and one it refuses is never written or written again")
   func gate() async throws {
     let ledger = Ledger()

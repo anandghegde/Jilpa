@@ -282,3 +282,62 @@ private actor Held {
     waiting = []
   }
 }
+
+/// The ranker reads the same cache the recents do (N1), so a folder cannot be recent in one and
+/// unranked in the other, and ranking reads no database.
+@MainActor
+@Suite("Ranking from the recents' counters")
+struct SuggestionSourceTests {
+  /// Counters with identities of their own, so no two folders here can ever be one place.
+  private func counter(
+    _ path: String, id: UInt64, app: AppID = editor, uses: Int, daysAgo: Double = 0
+  ) -> DestinationStat {
+    DestinationStat(
+      location: LocationRef(
+        path: path,
+        identity: LocationIdentity(volumeUUID: "VOL-1", fileID: id, persistentIDs: true),
+        lineage: [FolderKey("key:" + path), FolderKey("key:/u")]),
+      key: DestinationKey(app: app, purpose: .save, extClass: "pdf"),
+      counter: DecayedCounter(score: Double(uses), uses: uses, updatedAt: now - daysAgo * day))
+  }
+
+  private func query(_ policy: SessionPolicy = policy()) -> RankingQuery {
+    RankingQuery(
+      app: editor, purpose: .known(.save, source: "test"), fileExtension: "pdf", policy: policy,
+      now: now)
+  }
+
+  @Test func theHeldCountersAreRankedWithoutAnotherRead() async {
+    let counters = Counters([
+      counter("/u/invoices", id: 1, uses: 6), counter("/u/scans", id: 2, app: viewer, uses: 9),
+      counter("/u/old", id: 3, uses: 1, daysAgo: 120),
+    ])
+    let centre = RecentsCenter(read: { await counters.read($0) }, now: { now })
+    // A cold start: nothing read yet, nothing suggested, and never a folder made up to fill in.
+    #expect(await centre.suggestions(query(), limit: 5).isEmpty)
+
+    centre.refresh(PrivacyState())
+    await centre.settle()
+    let ranked = await centre.suggestions(query(), limit: 5)
+    // This app's history first; another app's by the wide levels; a use past the floor not at all.
+    #expect(ranked.map(\.location.path) == ["/u/invoices", "/u/scans"])
+    #expect(ranked.first?.signals.first?.signal == .appPurposeType)
+    #expect(await centre.suggestions(query(), limit: 1).count == 1)
+    #expect(await counters.reads.count == 1)
+  }
+
+  /// The query's policy is the dialog's, and the ranker asks it: private mode and a
+  /// non-recording dialog suggest nothing from history, even from counters that are cached.
+  @Test func theDialogsPolicyDecides() async {
+    let counters = Counters([counter("/u/invoices", id: 1, uses: 6)])
+    let centre = RecentsCenter(read: { await counters.read($0) }, now: { now })
+    centre.refresh(PrivacyState())
+    await centre.settle()
+    #expect(await centre.suggestions(query(), limit: 5).count == 1)
+    #expect(
+      await centre.suggestions(query(policy(PrivacyState(privateMode: true))), limit: 5).isEmpty)
+    let nonRecording = PrivacyGate().sessionPolicy(
+      GateContext(state: PrivacyState(), app: editor, recording: .nonRecording))
+    #expect(await centre.suggestions(query(nonRecording), limit: 5).isEmpty)
+  }
+}

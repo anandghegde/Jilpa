@@ -117,7 +117,7 @@ public final class ActivityStore: Sendable {
     try Self.expect(use, .learn)
     let use = use.value
     return try await write { db in
-      let location = try Self.upsert(use.location, db)
+      let location = try Self.upsert(use.location, gitRootObserved: true, db)
       let key = Stored.arguments(location, use.key)
       let row = try Row.fetchOne(
         db, sql: "SELECT score, uses, updated_at FROM dest_stat WHERE \(Stored.statKeyMatch)",
@@ -420,12 +420,18 @@ public final class ActivityStore: Sendable {
   /// Inserts the location or brings its row up to date, and replaces its lineage. Activity
   /// never changes the identity recorded for a configured folder: that identity is what a
   /// repair is offered from, and the folder now at the path may be another one.
-  private static func upsert(_ location: LocationRef, configured: Bool = false, _ db: Database) throws
-    -> Int64
-  {
+  /// `gitRootObserved` is true only for the write whose caller looked: a confirmed use, which
+  /// asks under the developer-context permit. Every other row that names a folder — a session's
+  /// two folders, a frozen ranking, a navigation's target — says nothing about it either way,
+  /// and must not take away a mark the recents draw.
+  private static func upsert(
+    _ location: LocationRef, configured: Bool = false, gitRootObserved: Bool = false,
+    _ db: Database
+  ) throws -> Int64 {
     guard !location.lineage.isEmpty else { throw StoreError.locationWithoutLineage }
     let identity = location.identity
     let keep = configured ? "0" : "configured = 1"
+    let gitRoot = gitRootObserved ? "excluded.git_root" : "git_root"
     let id = try Int64.fetchOne(
       db,
       sql: """
@@ -435,7 +441,7 @@ public final class ActivityStore: Sendable {
           volume_uuid = CASE WHEN \(keep) THEN volume_uuid ELSE COALESCE(excluded.volume_uuid, volume_uuid) END,
           file_id = CASE WHEN \(keep) THEN file_id ELSE COALESCE(excluded.file_id, file_id) END,
           persistent_ids = CASE WHEN \(keep) THEN persistent_ids ELSE COALESCE(excluded.persistent_ids, persistent_ids) END,
-          kind = excluded.kind, git_root = excluded.git_root,
+          kind = excluded.kind, git_root = \(gitRoot),
           configured = MAX(configured, excluded.configured)
         RETURNING id
         """,

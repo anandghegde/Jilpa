@@ -27,11 +27,25 @@ public protocol RecentsSource: AnyObject {
   func refresh(_ state: PrivacyState)
 }
 
+/// What a dialog asks of the ranker (N1).
+///
+/// Protocol-typed and held weakly by the presenter, like the recents: a presenter with nobody
+/// listening ranks nothing, freezes no shadow ranking and records its dialogs unscored, which is
+/// exactly what a cold start with no counters looks like.
+@MainActor
+public protocol SuggestionSource: AnyObject {
+  /// The best `limit` folders for this dialog, best first, with the evidence for each. The
+  /// query carries the dialog's own policy, and the ranker asks it per signal family, so what
+  /// comes back is already past the gate.
+  func suggestions(_ query: RankingQuery, limit: Int) async -> [Suggestion]
+}
+
 /// The recents, live: one read of the frecency counters, shared by every surface that offers
 /// them (D5).
 ///
-/// There is no second record of what was used. The counters the ranker will read are the
-/// counters these lists come from, so a folder cannot be recent here and unranked there.
+/// There is no second record of what was used. The counters the ranker reads are the counters
+/// these lists come from, so a folder cannot be recent here and unranked there: this is also
+/// the ranker's in-memory copy of them, and `suggestions` ranks over it (N1).
 ///
 /// It caches, because a menu is built inside a tracking loop and a database read is not
 /// something to do there. What it caches is what the store already filtered, so a state that
@@ -67,13 +81,17 @@ public final class RecentsCenter: RecentsSource {
   private var pins: [(pin: DestinationPin, context: GateContext)] = []
   private var listeners: [() -> Void] = []
 
+  /// Times each ranking, which has a budget of its own (50 ms at p95).
+  private let signposts: Signposts
+
   public init(
     read: @escaping Reader, pin: Pinner? = nil,
-    now: @escaping @Sendable () -> Date = { Date() }
+    now: @escaping @Sendable () -> Date = { Date() }, signposts: Signposts = .silent
   ) {
     self.read = read
     self.setPin = pin
     self.now = now
+    self.signposts = signposts
   }
 
   /// The centre the app runs with. The store filters what it hands back for the client and the
@@ -153,5 +171,25 @@ public final class RecentsCenter: RecentsSource {
       for listener in listeners { listener() }
     }
     running = nil
+  }
+}
+
+extension RecentsCenter: SuggestionSource {
+  /// Ranks over the counters this centre holds, off the main actor.
+  ///
+  /// The counters are a value, so what is ranked is the copy taken here, and a read that lands
+  /// while the ranking runs changes the next one and not this. The ranker reads every counter on
+  /// each call and filters them through the gate again, because an exclusion may be newer than
+  /// the read that filled the cache: 4 ms at p95 over 10,000 counters in `jilpa-bench rank`,
+  /// which is time the strip is not to spend on the main thread.
+  public func suggestions(_ query: RankingQuery, limit: Int) async -> [Suggestion] {
+    let ranker = FrecencyRanker(stats: stats)
+    let signposts = signposts
+    return await Task.detached(priority: .userInitiated) {
+      let interval = signposts.begin(.rank)
+      let ranked = ranker.rank(query, limit: limit)
+      signposts.end(interval)
+      return ranked
+    }.value
   }
 }

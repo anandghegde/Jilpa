@@ -306,6 +306,32 @@ struct ActivityStoreTests {
     #expect(try await store.destinationStats(for: .ui, normal).map(\.counter.uses) == [40])
   }
 
+  @Test("only a use says whether a folder is a git root; a session, a ranking or an attempt keeps the mark")
+  func gitRoot() async throws {
+    let scratch = try Scratch()
+    let store = scratch.store
+    var repo = place("/work/jilpa", file: 1, under: ["/work"])
+    repo.isGitRoot = true
+    let key = DestinationKey(app: editor, purpose: .save)
+    try await store.recordUse(cleared(DestinationUse(location: repo, key: key, at: t0)))
+    func marked() async throws -> [Bool] {
+      try await store.destinationStats(for: .ui, normal).map(\.location.isGitRoot)
+    }
+    #expect(try await marked() == [true])
+
+    // The same folder named by rows whose writers did not look, as they all are.
+    let unlooked = place("/work/jilpa", file: 1, under: ["/work"])
+    try await store.record(
+      cleared(session("s1", in: unlooked)),
+      ranking: cleared(ranking("s1", [unlooked]), for: .storeShadowRanking))
+    try await store.record(cleared(attempt("s1", to: unlooked), for: .reliabilityCounters))
+    #expect(try await marked() == [true])
+
+    // A use looks, so it is the one write that may take the mark away.
+    try await store.recordUse(cleared(DestinationUse(location: unlooked, key: key, at: t0 + 1)))
+    #expect(try await marked() == [false])
+  }
+
   @Test("activity never rewrites the identity recorded for a configured folder")
   func configuredIdentity() async throws {
     let scratch = try Scratch()

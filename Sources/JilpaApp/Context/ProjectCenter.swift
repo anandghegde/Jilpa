@@ -19,6 +19,10 @@ public protocol ProjectSource: AnyObject {
   /// all: no supported or unsupported developer tool has been seen in this run, the gate
   /// refuses the suggestion, or the root is inside an excluded folder.
   func offer(policy: SessionPolicy) -> ProjectOffer?
+
+  /// The same folders the offer names, with their lineage, as the ranker takes them (N1): the
+  /// root first, then its common subfolders. Empty whenever the offer names none.
+  func sensedFolders(policy: SessionPolicy) -> [SensedFolder]
 }
 
 /// The sensed active project, live (N5, spike 5).
@@ -248,6 +252,14 @@ public final class ProjectCenter: ProjectSource {
       }
       return ProjectOffer(.unknown(reason))
     }
+  }
+
+  public func sensedFolders(policy: SessionPolicy) -> [SensedFolder] {
+    // The offer decides whether there is a project at all, so the two cannot disagree: a root
+    // that was located for an earlier answer, or one under an exclusion, is not suggested here
+    // either.
+    guard case .known = offer(policy: policy)?.state, let located else { return [] }
+    return PrivacyGate().filter(located.folders, for: .ui, policy.context)
   }
 
   private static func unsupportedName(_ app: AppID) -> String? { unsupported[app] }

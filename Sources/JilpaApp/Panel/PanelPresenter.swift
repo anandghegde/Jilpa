@@ -60,8 +60,13 @@ import JilpaUI
 /// through the cycle hotkey, from one reading taken when a dialog opens. Going to one is the
 /// same request to the Navigator as any other press.
 ///
-/// What WP7 adds next: the ranked set. Here a dialog with no default of its own still offers one
-/// folder, the same one for every dialog.
+/// It ranks each dialog once, on its first reading (N1), and keeps that answer as the dialog's
+/// shadow ranking: frozen before anything in the dialog could teach the ranker where it went, and
+/// written with the dialog's session row when the dialog ends, scored against the folder it was
+/// confirmed in. What is written is decided in `EndedDialog`, and whether it may be, by the gate.
+///
+/// What comes next: the ranked set on the strip. Here a dialog with no default of its own still
+/// offers one folder, the same one for every dialog.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -88,6 +93,9 @@ public final class PanelPresenter: PanelActions {
   /// Where a confirmed dialog's folder becomes a counter (D5). Nil when nothing learns, which
   /// is what the tests and the soak run with and what a build with no store behaves like.
   private let uses: UseRecorder?
+  /// Where an ended dialog's session row and its frozen ranking go (N1, contract 6). Nil when
+  /// nothing records, like the two above.
+  private let sessions: SessionRecorder?
   private var destination: URL
 
   /// The favorites, in the configuration's order (D4). Given by the app, never read from a
@@ -129,6 +137,10 @@ public final class PanelPresenter: PanelActions {
   /// project, which is what no developer tool running looks like.
   public weak var projects: (any ProjectSource)?
 
+  /// The ranker (N1). Weak and optional like the rest: without one nothing is ranked, no shadow
+  /// ranking is frozen, and a dialog's row goes in unscored, which is what a cold start is.
+  public weak var suggestions: (any SuggestionSource)?
+
   /// Whether a folder is a git root, asked only under a developer-context permit. A closure so
   /// the presenter can be exercised without a disk.
   public var gitRoot: @Sendable (URL, SensePermit) -> Bool = { TerminalReader.isGitRoot($0, permit: $1) }
@@ -141,6 +153,30 @@ public final class PanelPresenter: PanelActions {
   /// not when it moves: contract 3 gives each dialog one automatic navigation and the ask is the
   /// chance. It ends with the dialog, as the trail does.
   private var resolved: Set<DialogSession.ID> = []
+
+  /// What the session row of each announced dialog is made from, beyond what the coordinator and
+  /// the trail already hold. It ends with the dialog, as the trail does.
+  private var watched: [DialogSession.ID: Watched] = [:]
+
+  private struct Watched {
+    var openedAt: Date
+    var closedAt: Date?
+    /// The ranking has been asked for. It is asked once, on the first reading, because that is
+    /// the first moment the proposed name and the gate's answers are known, and the last before
+    /// anything the dialog does could be what the ranker is scored on.
+    var asked = false
+    /// The ranker's answer to that one question. Nil until it lands, and for good when it never
+    /// does: the dialog is then recorded as never ranked, which is not counted, rather than as a
+    /// miss.
+    var frozen: [Suggestion]?
+    /// A reading said the ranking may not be stored — private mode came on, or the app was
+    /// paused — while the dialog was open. What was frozen before it is dropped then and is not
+    /// written later, even if the state has moved back by the time the dialog ends.
+    var withheld = false
+    /// What changed the dialog's folder by itself, if anything did. Such a dialog is recorded
+    /// and never scored: a folder Jilpa chose says nothing about the ranker.
+    var automated: AutoTriggerKind?
+  }
 
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
   private var shown: Shown?
@@ -214,7 +250,7 @@ public final class PanelPresenter: PanelActions {
     coordinator: DialogCoordinator, navigator: any Navigating, latch: ActivityLatchMirror,
     pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live,
     recorder: NavigationRecorder? = nil, uses: UseRecorder? = nil,
-    tracking: PanelTracking = .live,
+    sessions: SessionRecorder? = nil, tracking: PanelTracking = .live,
     preferred: DockSide = .below, clock: PollClock = .continuous,
     frontmost: @escaping @MainActor () -> pid_t? = {
       NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -228,6 +264,7 @@ public final class PanelPresenter: PanelActions {
     self.places = places
     self.recorder = recorder
     self.uses = uses
+    self.sessions = sessions
     self.destination = destination
     self.tracking = tracking
     self.preferred = preferred
@@ -273,6 +310,7 @@ public final class PanelPresenter: PanelActions {
     tracker = PanelTracker(style: tracking)
     trails.removeAll()
     resolved.removeAll()
+    watched.removeAll()
     if let recorder { Task { await recorder.forgetAll() } }
   }
 
@@ -283,6 +321,7 @@ public final class PanelPresenter: PanelActions {
   public func handle(_ event: CoordinatorEvent) async {
     switch event {
     case .found(let id, let app, let window, let variant):
+      if watched[id] == nil { watched[id] = Watched(openedAt: Date()) }
       // The anchors are still being found, so the strip attaches and its button waits: showing
       // it now is how the attach budget is met, and a dialog that turns out to be unnavigable
       // takes it away again.
@@ -299,6 +338,9 @@ public final class PanelPresenter: PanelActions {
       // Every announced dialog, not only the one under the strip: a folder the user reached by
       // themselves belongs in the history whether or not the panel was watching.
       await noteFolder(dialog)
+      // Every announced dialog too: a dialog in an app the user has left is still confirmed or
+      // cancelled, and its row is still owed.
+      considerRanking(dialog)
       guard shown?.id == dialog.id else { return }
       shown?.descriptor = dialog.session.descriptor
       shown?.isEnabled = dialog.session.allowsManualNavigation
@@ -322,12 +364,15 @@ public final class PanelPresenter: PanelActions {
 
     case .ignored(let id, _, _, _):
       if let id, shown?.id == id { dismiss(id) }
+      // A dialog announced and then not taken up has no row to write.
+      if let id { watched[id] = nil }
 
     case .gone(let id):
       if shown?.id == id { dismiss(id) }
       latch.forget(id)
       trails[id] = nil
       resolved.remove(id)
+      watched[id] = nil
       cycled[id] = nil
       await recorder?.forget(id)
 
@@ -337,6 +382,7 @@ public final class PanelPresenter: PanelActions {
       // confirmed — which is the last thing this trail holds.
       if shown?.id == dialog.id { dismiss(dialog.id) }
       latch.forget(dialog.id)
+      watched[dialog.id]?.closedAt = Date()
 
     case .ended(let dialog):
       // `.ended` always follows `.closed`, so the strip is usually already gone; dismissing
@@ -344,8 +390,11 @@ public final class PanelPresenter: PanelActions {
       if shown?.id == dialog.id { dismiss(dialog.id) }
       latch.forget(dialog.id)
       await recordUse(dialog)
+      // Before the trail goes, because the row names the folders the trail holds.
+      await recordSession(dialog)
       trails[dialog.id] = nil
       resolved.remove(dialog.id)
+      watched[dialog.id] = nil
       cycled[dialog.id] = nil
       await recorder?.forget(dialog.id)
     }
@@ -542,6 +591,102 @@ public final class PanelPresenter: PanelActions {
     // Only once a row is really stored. The menus read a cache, and a refresh that follows a
     // write nobody made would be a read the user's next dialog pays for and learns nothing by.
     recentsSource?.refresh(dialog.policy.context.state)
+  }
+
+  // MARK: - The ranking
+
+  /// The one ranking a dialog gets, asked for on its first reading (N1).
+  ///
+  /// Not awaited here: the ranking reads the file system for the pinned folder and the front
+  /// Finder window, and this runs in the pump that carries the readings the latch mirror and
+  /// the Navigator's stop depend on. It lands when it lands, and a dialog that has ended by then
+  /// is recorded as never ranked.
+  ///
+  /// A reading that says the ranking may not be stored drops what was frozen and keeps it
+  /// dropped. Turning private mode on in the middle of a dialog is a statement about that dialog
+  /// (architecture, Privacy gate).
+  private func considerRanking(_ dialog: ObservedDialog) {
+    var entry = watched[dialog.id] ?? Watched(openedAt: Date())
+    if !dialog.policy.allows(.storeShadowRanking) {
+      entry.withheld = true
+      entry.frozen = nil
+    }
+    let first = !entry.asked && dialog.session.snapshot != nil
+    if first { entry.asked = true }
+    watched[dialog.id] = entry
+    guard first, suggestions != nil, let app = dialog.app.app else { return }
+    Task { [weak self] in await self?.freeze(dialog, app: app) }
+  }
+
+  /// Ranks the dialog and keeps the answer as its shadow ranking, unless it has ended meanwhile
+  /// or a reading has said the ranking may not be kept.
+  private func freeze(_ dialog: ObservedDialog, app: AppID) async {
+    guard let suggestions else { return }
+    let query = await rankingQuery(for: dialog, app: app)
+    let ranked = await suggestions.suggestions(query, limit: ShadowRanking.depth)
+    guard var entry = watched[dialog.id], !entry.withheld else { return }
+    entry.frozen = ranked
+    watched[dialog.id] = entry
+  }
+
+  /// What the ranker is told about one dialog. Every part but the app may be missing, and a
+  /// missing part removes its signals; it never becomes a guess.
+  ///
+  /// The active context is the pin in force, and only the pin: nothing else names a context
+  /// yet. The sensed project is offered only while nothing is pinned, as on the strip, because
+  /// a pin beats sensed context (contract 4). The front Finder window is the first one the gate
+  /// lets this dialog see. Both folders are read off the main actor here, for their lineage and
+  /// their identity; the project's folders were read when the project was.
+  private func rankingQuery(for dialog: ObservedDialog, app: AppID) async -> RankingQuery {
+    let policy = dialog.policy
+    var scopes: [ContextScope] = []
+    var sensed: [SensedFolder] = []
+    if let pinned = pins?.pinnedFolder {
+      let root = await locate(URL(fileURLWithPath: pinned.path, isDirectory: true))
+      if let root, root.kind == .folder, let key = root.key {
+        scopes.append(ContextScope(root: root, key: key, label: pinned.name, source: .pin))
+      }
+    } else {
+      sensed += projects?.sensedFolders(policy: policy) ?? []
+    }
+    if let front = finderWindows?.windows(policy: policy).first,
+      let place = await locate(URL(fileURLWithPath: front.path, isDirectory: true)),
+      place.kind == .folder
+    {
+      sensed.append(SensedFolder(location: place, kind: .finderWindow, source: .finderWindow))
+    }
+    let name = dialog.session.snapshot?.filename
+    let ext = name.map { ($0 as NSString).pathExtension }.flatMap { $0.isEmpty ? nil : $0 }
+    return RankingQuery(
+      app: app, purpose: dialog.session.descriptor.purpose, fileExtension: ext, scopes: scopes,
+      sensed: sensed, policy: policy, now: Date())
+  }
+
+  /// One `dialog_session` row for a dialog that has ended, with its frozen ranking (N1).
+  ///
+  /// Every ended dialog of a known app is handed over, whatever its outcome: a cancel and an
+  /// unknown are rows too, and the unknown share per app is read from them. Whether anything is
+  /// written is the gate's, asked with this dialog's own context. The name is the one its
+  /// navigation attempts were written under, so the rows join.
+  private func recordSession(_ dialog: ObservedDialog) async {
+    guard let sessions, let app = dialog.app.app, let entry = watched[dialog.id],
+      case .ended(let outcome) = dialog.session.phase
+    else { return }
+    let name = await recorder?.session(of: dialog.id) ?? SessionID(rawValue: UUID().uuidString)
+    let descriptor = dialog.session.descriptor
+    let trail = trails[dialog.id]
+    await sessions.record(
+      EndedDialog(
+        session: name, app: app, appVersion: dialog.app.version, osBuild: SystemBuild.current,
+        purpose: descriptor.purpose,
+        // A window cannot be told modal from modeless while it runs (spike 1), so only a sheet
+        // is named.
+        presentation: descriptor.variant.isSheet ? .sheet : nil,
+        signatureID: descriptor.signature.rawValue, openedAt: entry.openedAt,
+        closedAt: entry.closedAt, original: trail?.history.original, lastFolder: trail?.place,
+        filename: dialog.session.snapshot?.filename, outcome: outcome,
+        autoTrigger: entry.automated, frozen: entry.withheld ? nil : entry.frozen,
+        policy: dialog.policy))
   }
 
   /// The recents a surface over this dialog may offer, already past the gate.
@@ -873,6 +1018,12 @@ public final class PanelPresenter: PanelActions {
     latch.endMove(target.id)
     moving = nil
     lastResult = result
+    // A refusal sent nothing, so the folder the dialog ends in is still the user's. Anything
+    // else sent input, whether or not it arrived, and the dialog no longer says only what the
+    // user chose (contract 3's "scored and reported separately").
+    if case .automation(let automatic) = trigger, result.kind != .refused {
+      watched[target.id]?.automated = automatic.kind
+    }
     // An arrival is the one reading the Navigator stands behind, so it becomes the session's
     // new baseline. Anything else hands back nothing and the coordinator reads again.
     var arrival: DialogSnapshot?
