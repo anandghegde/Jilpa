@@ -42,7 +42,7 @@ struct SuggestionChipsTests {
     #expect(chips.first?.detail == "/u")
     // The reason is the strongest evidence, which the ranker put first.
     #expect(chips.first?.reason == .ranked(evidence(.appPurposeType, 3)))
-    #expect(chips.allSatisfy(\.isRanked))
+    #expect(chips.allSatisfy { $0.isRanked })
   }
 
   /// A chip is somewhere to go. Staying put is a destination the shadow ranking needs and the
