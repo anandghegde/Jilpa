@@ -46,9 +46,12 @@ public final class ResolutionCenter: DialogResolving {
   /// The explicit defaults in the merged order, `config.toml` first (D8). Purpose-specific
   /// before purpose-neutral is the resolver's own rule and not this order's.
   private var defaults: [ExplicitDefault] = []
-  /// The stored pin, which is everything that names the active context until sensing and the
-  /// context engine land (N4, WP8). A default whose destination holds `{context}` therefore
-  /// expands under a pin and matches nothing without one, which is what a failed match means.
+  /// The pin in force, which is everything that names the active context until sensing lands
+  /// (N4). A default whose destination holds `{context}` therefore expands under a pin and
+  /// matches nothing without one, which is what a failed match means.
+  ///
+  /// Given by the pin centre and never read from the file here: a pin until Jilpa quits is not
+  /// in the file at all, and the centre is the one place that knows which of the two is in force.
   private var pin: Pin?
 
   public init(
@@ -67,7 +70,11 @@ public final class ResolutionCenter: DialogResolving {
   /// of what it is given, and holding a live centre would make the file a hidden input to it.
   public func configChanged(_ model: ConfigModel) {
     defaults = model.defaults.map(\.value)
-    pin = model.resolverPin(home: home)
+  }
+
+  /// The pin in force changed: made, released, ended, or renamed with its context (N4).
+  public func pinChanged(_ pin: Pin?) {
+    self.pin = pin
   }
 
   public func resolution(for dialog: ObservedDialog) async -> Resolution? {

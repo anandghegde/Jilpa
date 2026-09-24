@@ -391,6 +391,85 @@ struct PanelHostTests {
     #expect(listener.windows == ["/Users/ada/Desktop"])
   }
 
+  // MARK: - The context zone
+
+  /// Nothing pinned and nothing to pin is no zone at all; something to pin is the pin symbol
+  /// alone; a pin in force is its name and time left, with the symbol filled (N4).
+  @Test func theContextZoneShowsThePinAndItsTimeLeft() {
+    let host = PanelHost()
+    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    #expect(host.details[.context] == nil || host.details[.context] == .hidden)
+    #expect(host.contextZone.isHidden)
+    #expect(host.pinMenu() == nil)
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        pin: PinOffer(folders: [PinnableFolder(path: "/Users/ada/Acme")])))
+    #expect(host.details[.context] == .icon)
+    #expect(!host.pinIcon.isHidden && host.pinButton.isHidden)
+    #expect(host.pinIcon.accessibilityLabel() == "Pin a context")
+
+    host.update(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        pin: PinOffer(
+          current: acmePin, remaining: .hours(2), contexts: [acme])))
+    #expect(host.details[.context] == .full)
+    #expect(!host.pinButton.isHidden && host.pinIcon.isHidden)
+    #expect(host.pinButton.title == "Acme · 2 h")
+    #expect(host.pinButton.accessibilityLabel() == "Pinned: Acme, 2 h left")
+    #expect(host.pinButton.toolTip == host.pinButton.accessibilityLabel())
+  }
+
+  /// Down the side of a dialog the pin is its symbol, and the symbol still says what is pinned.
+  @Test func aVerticalStripDrawsThePinAsItsSymbol() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        pin: PinOffer(current: acmePin, remaining: .minutes(45), contexts: [acme])),
+      at: placement(.right, length: 400))
+    #expect(host.details[.context] == .icon)
+    #expect(host.pinIcon.accessibilityLabel() == "Pinned: Acme, 45 min left")
+  }
+
+  /// The menu is the pin in force with Release Pin, then each context and folder with the four
+  /// durations under it; each item reports what it names and changes nothing itself.
+  @Test func thePinMenuReportsEachChoice() throws {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        pin: PinOffer(
+          current: acmePin, remaining: nil, contexts: [acme],
+          folders: [PinnableFolder(path: "/Users/ada/Scratch")])),
+      at: placement(.below))
+    let menu = try #require(host.pinMenu())
+    #expect(menu.items.map(\.title) == ["Pinned: Acme", "Release Pin", "Pin Acme", "Pin Scratch"])
+    #expect(menu.items[0].subtitle == "Until you change it")
+    #expect(!menu.items[0].isEnabled)
+    #expect(menu.items[2].state == .on && menu.items[3].state == .off)
+    #expect(menu.items.allSatisfy { $0.keyEquivalent.isEmpty })
+
+    press(menu.items[1])
+    #expect(listener.releases == 1)
+
+    let durations = try #require(menu.items[3].submenu)
+    #expect(
+      durations.items.map(\.title)
+        == ["Until Changed", "For 1 Hour", "For 4 Hours", "Until Jilpa Quits"])
+    press(durations.items[2])
+    press(try #require(menu.items[2].submenu).items[3])
+    #expect(listener.pins.map(\.0) == [.folder("/Users/ada/Scratch"), .context("acme")])
+    #expect(listener.pins.map(\.1) == [.hours(4), .untilQuit])
+  }
+
+  private let acme = ContextRef(id: "acme", name: "Acme")
+  private let acmePin = PinSummary(choice: .context("acme"), name: "Acme", expiry: .untilChanged)
+
   private let documents = FinderWindowPlace(number: 5178, path: "/Users/ada/Documents")
   private let desktop = FinderWindowPlace(number: 43, path: "/Users/ada/Desktop")
 
@@ -871,4 +950,10 @@ private final class Listener: PanelActions {
   func panelChoseRecent(_ path: String) { recents.append(path) }
   var windows: [String] = []
   func panelChoseFinderWindow(_ path: String) { windows.append(path) }
+  var pins: [(PinChoice, PinDuration)] = []
+  var releases = 0
+  func panelChosePin(_ choice: PinChoice, _ duration: PinDuration) {
+    pins.append((choice, duration))
+  }
+  func panelChoseReleasePin() { releases += 1 }
 }

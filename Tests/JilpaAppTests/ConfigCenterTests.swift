@@ -272,6 +272,48 @@ struct ConfigCenterTests {
     #expect(!centre.notice.isEmpty)
   }
 
+  // MARK: - The pin
+
+  /// A pin is written under `~` like a favorite, to the second, and taken out with nil (N4).
+  @Test("a pin is written into the file Jilpa owns, and taken out again")
+  func writingThePin() throws {
+    let (home, centre) = try scratch()
+    defer { try? FileManager.default.removeItem(at: home) }
+    centre.start()
+    defer { centre.stop() }
+
+    let end = Date(timeIntervalSince1970: 1_800_000_000.75)
+    try centre.writePin(.folder(home.appendingPathComponent("Acme").path), expires: end)
+    let text = try String(contentsOf: centre.store.url(.managed), encoding: .utf8)
+    #expect(text.contains("folder = \"~/Acme\""))
+    let stored = try #require(centre.model.storedPin(home: home.path))
+    #expect(stored.choice == .folder(home.appendingPathComponent("Acme").path))
+    #expect(stored.expiry == .until(Date(timeIntervalSince1970: 1_800_000_000)))
+
+    try centre.writePin(nil, expires: nil)
+    #expect(centre.model.pin == nil)
+  }
+
+  /// Writing the pin the file already holds is no edit, so it raises no change: the pin centre
+  /// listens to changes, and a write that echoed would be one it answers forever.
+  @Test("writing the pin that is already there changes nothing")
+  func writingThePinTwice() throws {
+    let (home, centre) = try scratch()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let heard = Heard()
+    centre.onChange { heard.add($0) }
+    centre.start()
+    defer { centre.stop() }
+
+    let end = Date(timeIntervalSince1970: 1_800_000_000.25)
+    try centre.writePin(.folder("/Volumes/Work/Acme"), expires: end)
+    #expect(heard.changes.count == 1)
+    try centre.writePin(.folder("/Volumes/Work/Acme"), expires: end.addingTimeInterval(0.5))
+    try centre.writePin(nil, expires: nil)
+    try centre.writePin(nil, expires: nil)
+    #expect(heard.changes.count == 2)
+  }
+
   // MARK: - Pieces
 
   @Test("a path under the home folder is written the way the user writes it")

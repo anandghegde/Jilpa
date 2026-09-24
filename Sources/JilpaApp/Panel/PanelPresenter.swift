@@ -120,6 +120,10 @@ public final class PanelPresenter: PanelActions {
   /// looks like apart from the line that says so.
   public weak var finderWindows: (any FinderWindowsSource)?
 
+  /// The pin (N4). Weak and optional like the rest: without one the strip draws no context zone,
+  /// and resolution is told about the pin by whoever holds it, not through the strip.
+  public weak var pins: (any PinSource)?
+
   /// The window the cycle hotkey last went to in each dialog, so the next press goes to the one
   /// after it. It ends with the dialog, as the trail does.
   private var cycled: [DialogSession.ID: Int] = [:]
@@ -412,6 +416,36 @@ public final class PanelPresenter: PanelActions {
     // The strip is not redrawn here. The write raises a configuration change, the app hands the
     // new list back through `setFavorites`, and the menu is right because the file is — not
     // because two places guessed the same thing.
+  }
+
+  // MARK: - The pin
+
+  /// The folder the dialog under the strip is in, as the last reading named it. The pin chord
+  /// pins it when nothing is pinned (`PinHotkey`).
+  public var dialogFolder: String? { shown.flatMap { trails[$0.id]?.place?.path } }
+
+  /// The pin moved, or its time left ticked down. The strip redraws; nothing is sent.
+  public func pinsChanged() { apply() }
+
+  /// A pin made from the strip. Like adding a favorite it writes the configuration and sends
+  /// nothing to the dialog: the pin decides the next dialog's resolution, and the one on screen
+  /// keeps what it was given (contract 3's one automatic chance is already spent).
+  public func panelChosePin(_ choice: PinChoice, _ duration: PinDuration) {
+    guard let shown else { return }
+    do {
+      try pins?.pin(choice, for: duration)
+    } catch {
+      note(shown.id, FavoriteNotices.notWritten(error))
+    }
+  }
+
+  public func panelChoseReleasePin() {
+    guard let shown else { return }
+    do {
+      try pins?.release()
+    } catch {
+      note(shown.id, FavoriteNotices.notWritten(error))
+    }
   }
 
   public func panelChoseRemoveFavorite(_ id: FavoriteID) {
@@ -859,7 +893,11 @@ public final class PanelPresenter: PanelActions {
       favorites: favorites, folder: trail?.place?.path,
       favoriteHere: trail?.place?.key.flatMap(favorite(at:)),
       recents: recents(for: shown, in: appScope(shown), limit: RecentsCenter.menuLimit),
-      finderWindows: finderWindows(for: shown))
+      finderWindows: finderWindows(for: shown),
+      // The dialog's own folder is the ad hoc project the strip offers: it is the folder the
+      // user is looking at, and the one place that knows it is this dialog's reading.
+      pin: pins?.offer(folders: trail?.place.map { [PinnableFolder(path: $0.path)] } ?? [])
+        ?? PinOffer())
   }
 
   /// Which favorite is this folder, if one of them is. By key, never by path: two paths can

@@ -60,12 +60,15 @@ public struct PanelContents: Sendable, Equatable {
   /// recents, and empty when Finder automation is not allowed: the strip then draws no windows
   /// menu, and the cycle hotkey is where the reason is said.
   public var finderWindows: [FinderWindowPlace]
+  /// The pin in force and what could be pinned instead (N4). The context zone draws it: the
+  /// pin with its time left when there is one, a pin symbol when there is only something to pin.
+  public var pin: PinOffer
 
   public init(
     destination: String, isEnabled: Bool, notice: Notice? = nil,
     history: HistoryState = HistoryState(), favorites: [FavoritePlace] = [],
     folder: String? = nil, favoriteHere: FavoriteID? = nil, recents: [RecentPlace] = [],
-    finderWindows: [FinderWindowPlace] = []
+    finderWindows: [FinderWindowPlace] = [], pin: PinOffer = PinOffer()
   ) {
     self.destination = destination
     self.isEnabled = isEnabled
@@ -76,6 +79,7 @@ public struct PanelContents: Sendable, Equatable {
     self.favoriteHere = favoriteHere
     self.recents = recents
     self.finderWindows = finderWindows
+    self.pin = pin
   }
 }
 
@@ -105,6 +109,12 @@ public protocol PanelActions: AnyObject {
   func panelChoseRecent(_ path: String)
   /// A Finder window chosen from the strip's windows menu (D7), named by its folder's path.
   func panelChoseFinderWindow(_ path: String)
+  /// A context or folder pinned from the strip's context zone, for how long (N4). It writes
+  /// the configuration and sends nothing to the dialog: a pin decides the next resolution, not
+  /// the folder this one is in.
+  func panelChosePin(_ choice: PinChoice, _ duration: PinDuration)
+  /// Release Pin, from the same menu.
+  func panelChoseReleasePin()
 }
 
 /// The strip's one window and its contents (D2).
@@ -191,8 +201,17 @@ public final class PanelHost {
   let recentsIcon: StripButton
   let windowsButton: StripButton
   let windowsIcon: StripButton
+  /// The pin in force with its time left, or the way to make one (N4).
+  let contextZone: NSStackView
+  /// The pin's name and time left.
+  let pinButton: StripButton
+  /// The pin as a symbol alone: filled while one is in force, empty while there is only
+  /// something to pin.
+  let pinIcon: StripButton
   /// The fuzzy jump, in the same window as the zones and never up at the same time.
   let jump: JumpView
+  /// Builds the context zone's menu and is its items' target.
+  private let pinMenuBuilder = PinMenu()
 
   private var contents: PanelContents?
   /// The side the strip is docked to, which decides whether the zones run across or down.
@@ -299,7 +318,21 @@ public final class PanelHost {
       ])
     menusZone.spacing = Self.controlSpacing
 
-    zones = NSStackView(views: [historyZone, suggestionZone, noticeZone, menusZone])
+    pinButton = StripButton()
+    pinButton.bezelStyle = .accessoryBar
+    pinButton.setButtonType(.momentaryPushIn)
+    pinButton.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil)
+    pinButton.imagePosition = .imageLeading
+    pinButton.lineBreakMode = .byTruncatingTail
+    // The pin's name gives up its width before the menus do: they are fixed words, and a name
+    // truncated still says which project it is.
+    pinButton.setContentCompressionResistancePriority(.defaultLow + 2, for: .horizontal)
+    pinButton.setContentHuggingPriority(.required, for: .horizontal)
+    pinIcon = Self.iconButton(symbol: "pin")
+    contextZone = NSStackView(views: [pinButton, pinIcon])
+    contextZone.spacing = Self.controlSpacing
+
+    zones = NSStackView(views: [historyZone, suggestionZone, noticeZone, menusZone, contextZone])
     zones.orientation = .horizontal
     zones.alignment = .centerY
     zones.spacing = Self.zoneSpacing
@@ -352,6 +385,14 @@ public final class PanelHost {
       control.setAccessibilityLabel(String(localized: "Finder windows"))
       control.toolTip = String(localized: "Finder windows")
     }
+    for control in [pinButton, pinIcon] {
+      control.target = self
+      control.action = #selector(pinPressed)
+    }
+    pinMenuBuilder.onPin = { [weak self] choice, duration in
+      self?.actions?.panelChosePin(choice, duration)
+    }
+    pinMenuBuilder.onRelease = { [weak self] in self?.actions?.panelChoseReleasePin() }
 
     // Reduce Transparency and Increase Contrast can both be turned on while a dialog is open.
     // Subscribed by selector rather than by block, so there is no token to give back: the
@@ -468,6 +509,7 @@ public final class PanelHost {
     // The symbol is the whole zone once the line has been truncated away, so it carries the
     // line for VoiceOver whatever the strip's length.
     noticeSymbol.setAccessibilityLabel(next.notice?.text)
+    drawPin(next.pin)
     relayout()
     announce(next.notice)
   }
@@ -547,6 +589,7 @@ public final class PanelHost {
     suggestionZone.orientation = zones.orientation
     noticeZone.orientation = zones.orientation
     menusZone.orientation = zones.orientation
+    contextZone.orientation = zones.orientation
 
     let frame = window.frame
     let length = (horizontal ? frame.width : frame.height) - 2 * Self.inset
@@ -606,6 +649,17 @@ public final class PanelHost {
               : [.icon: Self.controlLength]))
     }
 
+    // The context zone: the pin's name and time left with its symbol as the smaller drawing, or
+    // the symbol alone while nothing is pinned and something could be.
+    if let pin = contents?.pin, !pin.isEmpty {
+      demands.append(
+        horizontal && pin.current != nil
+          ? ZoneDemand(
+            zone: .context, full: max(pinButton.fittingSize.width, Self.controlLength),
+            icon: Self.controlLength)
+          : ZoneDemand(zone: .context, lengths: [.icon: Self.controlLength]))
+    }
+
     guard contents?.notice != nil else { return demands }
     if horizontal {
       let line = Self.controlLength + Self.controlSpacing + notice.fittingSize.width
@@ -652,6 +706,33 @@ public final class PanelHost {
     windowsButton.isHidden = !(offer.windows && menus == .full)
     windowsIcon.isHidden = !(offer.windows
       && (menus == .compact || (menus == .icon && !offer.favorites && !offer.recents)))
+
+    let context = details[.context] ?? .hidden
+    contextZone.isHidden = context == .hidden
+    pinButton.isHidden = context != .full
+    pinIcon.isHidden = context != .icon
+  }
+
+  /// The context zone's words and symbols for this offer. The name and the time left are the
+  /// button's title; the same with what ends the pin is its tooltip and its VoiceOver label, so
+  /// the icon alone loses nothing.
+  private func drawPin(_ offer: PinOffer) {
+    let label: String
+    if let current = offer.current {
+      let lasts = PinMenu.lasts(current, remaining: offer.remaining)
+      pinButton.title =
+        offer.remaining.map { "\(current.name) · \(PinMenu.short($0))" } ?? current.name
+      pinIcon.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil)
+      label = String(localized: "Pinned: \(current.name), \(lasts)")
+    } else {
+      pinButton.title = ""
+      pinIcon.image = NSImage(systemSymbolName: "pin", accessibilityDescription: nil)
+      label = String(localized: "Pin a context")
+    }
+    for control in [pinButton, pinIcon] {
+      control.setAccessibilityLabel(label)
+      control.toolTip = label
+    }
   }
 
   /// What the menus zone has to offer right now, which decides both what it asks for and what
@@ -831,6 +912,23 @@ public final class PanelHost {
       item.subtitle = place.detail
       menu.addItem(item)
     }
+    return menu
+  }
+
+  /// Pops the pin menu under whichever of the two was pressed (N4). Built and thrown away like
+  /// the others, by the same builder the menu bar uses.
+  @objc private func pinPressed(_ sender: NSView) {
+    guard let menu = pinMenu() else { return }
+    let corner = side == .above ? NSPoint(x: 0, y: 0) : NSPoint(x: 0, y: sender.bounds.height)
+    menu.popUp(positioning: nil, at: corner, in: sender)
+  }
+
+  /// The pin menu as it stands right now. Nil when there is nothing pinned and nothing to pin.
+  func pinMenu() -> NSMenu? {
+    guard let contents, !contents.pin.isEmpty else { return nil }
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    for item in pinMenuBuilder.items(contents.pin) { menu.addItem(item) }
     return menu
   }
 

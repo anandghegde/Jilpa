@@ -7,7 +7,8 @@ import AppKit
 import JilpaCore
 
 /// Menu bar presence (S1). It carries the version, Quit, the favorites (D4), the recents with
-/// their pins (D5), Finder's open windows (D7), private mode and the per-app pause (D18).
+/// their pins (D5), Finder's open windows (D7), the context pin (N4), private mode and the
+/// per-app pause (D18).
 ///
 /// The controller holds no policy. It is told what the favorites and the recents are and
 /// reports which one was chosen; whether that means navigating the dialog in front or opening a
@@ -37,6 +38,17 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   /// Show Finder Windows chosen while macOS has not been asked yet. This is the first use of a
   /// Finder feature, and the one place Jilpa asks macOS to put the question to the user.
   public var onRequestFinderAccess: (() -> Void)?
+  /// A context or folder pinned from the menu bar, for how long (N4). Not the recents' pin
+  /// above, which keeps a folder in a list; this one names the project resolution works in.
+  public var onPinContext: ((PinChoice, PinDuration) -> Void)? {
+    get { pinMenu.onPin }
+    set { pinMenu.onPin = newValue }
+  }
+  /// Release Pin, from the menu bar.
+  public var onReleaseContextPin: (() -> Void)? {
+    get { pinMenu.onRelease }
+    set { pinMenu.onRelease = newValue }
+  }
 
   private let item: NSStatusItem
   private let menu = NSMenu()
@@ -49,6 +61,10 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   /// Nil while nothing watches dialogs — no Accessibility grant — because a pause or private
   /// mode would then be a switch that changes nothing the user could see.
   private var controls: PrivacyControls?
+  /// The pin in force and what could be pinned. Given whether or not dialogs are watched: a
+  /// pin is configuration, and it is there for the next dialog whenever that comes.
+  private var pins = PinOffer()
+  private let pinMenu = PinMenu()
 
   public init(version: String) {
     self.version = version
@@ -86,6 +102,14 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     guard list != finderWindows || automation != finderAutomation else { return }
     finderWindows = list
     finderAutomation = automation
+    rebuild()
+  }
+
+  /// The pin in force, its time left and what could be pinned (N4). Redrawn when the time left
+  /// ticks down, so a menu open across the minute shows the minute it is.
+  public func setPins(_ offer: PinOffer) {
+    guard offer != pins else { return }
+    pins = offer
     rebuild()
   }
 
@@ -192,6 +216,7 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     addFinderWindows()
+    addPins()
 
     if let controls { addControls(controls) }
 
@@ -246,6 +271,28 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       row.subtitle = place.detail
       menu.addItem(row)
     }
+  }
+
+  /// The pin section (N4): the pin in force in the menu itself, because it is what decides
+  /// where the next dialog goes and a pin the user has forgotten is one that quietly steers;
+  /// then what could be pinned instead, in a submenu, because the favorites are already in the
+  /// menu once and a second list of them here would be the menu twice as long.
+  private func addPins() {
+    guard !pins.isEmpty else { return }
+    menu.addItem(.separator())
+    for item in pinMenu.currentItems(pins) { menu.addItem(item) }
+    let choices = pinMenu.choiceItems(pins)
+    guard !choices.isEmpty else { return }
+    let list = NSMenu()
+    list.autoenablesItems = false
+    for item in choices { list.addItem(item) }
+    let row = NSMenuItem(
+      title: pins.current == nil
+        ? String(localized: "Pin a Context") : String(localized: "Pin Something Else"),
+      action: nil, keyEquivalent: "")
+    row.image = NSImage(systemSymbolName: "pin", accessibilityDescription: nil)
+    row.submenu = list
+    menu.addItem(row)
   }
 
   @objc private func finderWindowPressed(_ sender: NSMenuItem) {

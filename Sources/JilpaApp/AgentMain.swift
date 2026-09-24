@@ -36,6 +36,7 @@ public enum AgentMain {
 final class AgentDelegate: NSObject, NSApplicationDelegate {
   private var statusItem: StatusItemController?
   private var config: ConfigCenter?
+  private var pins: PinCenter?
   private var agent: DialogAgent?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -70,24 +71,48 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
       // Finder's windows as last read, and a new read that redraws the open menu when it lands.
       self?.showFinderWindows()
       self?.agent?.refreshFinderWindows()
+      // The dialog's folder is offered as a pin, and it is whichever dialog is under the strip
+      // as the menu opens.
+      self?.showPins()
     }
     statusItem.onChooseFinderWindow = { [weak self] place in self?.chose(place) }
     statusItem.onRequestFinderAccess = { [weak self] in self?.agent?.requestFinderAccess() }
     statusItem.onSetPrivateMode = { [weak self] on in self?.agent?.setPrivateMode(on) }
     statusItem.onSetPaused = { [weak self] app, paused in self?.agent?.setPaused(paused, app) }
+
+    // The pin (N4). Made here rather than by the agent, like the configuration it is written
+    // to: it is there without the Accessibility grant, so the menu bar can show and release a
+    // pin whether or not any dialog is watched. A write that failed leaves the pin as it was,
+    // and the menu, rebuilt from the centre, shows that.
+    let pins = PinCenter(writer: config, home: config.home)
+    self.pins = pins
+    pins.configChanged(config.model)
+    pins.start()
+    statusItem.onPinContext = { [weak self] choice, duration in
+      try? self?.pins?.pin(choice, for: duration)
+    }
+    statusItem.onReleaseContextPin = { [weak self] in try? self?.pins?.release() }
+    pins.onChange { [weak self] in
+      self?.agent?.pinsChanged()
+      self?.showPins()
+    }
+    showPins()
     // One listener for the whole fan-out, so the surfaces cannot disagree about the order they
     // were told in. The agent may not exist; the menu bar always does.
     config.onChange { [weak self] change in
       guard change.contains(.model) else { return }
       self?.statusItem?.setFavorites(config.favorites)
       self?.agent?.configChanged(config)
+      // After the agent, so the pin that reaches resolution is read against the contexts this
+      // load named. The centre announces only what moved.
+      self?.pins?.configChanged(config.model)
     }
 
     // Nothing is observed until the Accessibility permission is granted. Onboarding, which
     // asks for it and waits for the grant, is WP7; until then a launch without it is a menu bar
     // item and nothing else.
     guard AXTrust.isTrusted else { return }
-    let agent = DialogAgent(config: config)
+    let agent = DialogAgent(config: config, pins: pins)
     self.agent = agent
     // A menu already on screen when a dialog was confirmed does not go on showing the list it
     // was built with, for the same reason the favorites propagate immediately (D4, D5).
@@ -101,6 +126,14 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     agent.onFinderWindowsChange = { [weak self] in self?.showFinderWindows() }
     statusItem.setControls(agent.menuControls())
     agent.start()
+  }
+
+  /// The pin as the menu bar shows it: the contexts, and the folder of the dialog under the
+  /// strip when there is one, which is the ad hoc project a menu about no dialog can name.
+  private func showPins() {
+    guard let pins else { return }
+    let folders = agent?.dialogFolder.map { [PinnableFolder(path: $0)] } ?? []
+    statusItem?.setPins(pins.offer(folders: folders))
   }
 
   private func showFinderWindows() {
@@ -141,6 +174,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     agent?.stop()
+    pins?.stop()
     config?.stop()
   }
 }
@@ -173,6 +207,9 @@ final class DialogAgent {
   /// Finder's open windows (D7), read when a dialog opens and when the menu bar opens, and
   /// shared by the strip, the fuzzy jump, the cycle hotkey and the menu bar.
   private let finders = FinderWindowsCenter.live()
+  /// The pin (N4). The app delegate's, because it outlives the grant; the agent hands the live
+  /// pin to resolution and the offer to the strip.
+  private let pins: PinCenter
   private var tasks: [Task<Void, Never>] = []
 
   /// The counters moved. The menu bar redraws from this; the strip is the presenter's own.
@@ -182,7 +219,8 @@ final class DialogAgent {
   /// A new reading of Finder's windows, or of whether Jilpa may read them.
   var onFinderWindowsChange: (() -> Void)?
 
-  init(config: ConfigCenter) {
+  init(config: ConfigCenter, pins: PinCenter) {
+    self.pins = pins
     let compat = CompatSource.live()
     self.compat = compat
     // The same `managed.toml`, through the same atomic read-change-write: a pause the UI writes
@@ -221,6 +259,7 @@ final class DialogAgent {
     presenter.resolutions = resolutions
     recents?.onChange { [weak self] in self?.onRecentsChange?() }
     presenter.finderWindows = finders
+    presenter.pins = pins
     finders.onChange { [weak self] in
       self?.presenter.finderWindowsChanged()
       self?.onFinderWindowsChange?()
@@ -253,11 +292,18 @@ final class DialogAgent {
       guard let self else { return }
       self.setPrivateMode(!self.policy.state.privateMode)
     }
+    // Global too, with no default. A toggle: it releases a pin in force, and otherwise pins the
+    // folder of the dialog under the strip, or brings back the pin it last released (N4).
+    hotkeys.answer(.pinContext) { [weak self] in
+      guard let self else { return }
+      try? self.pins.toggle(dialogFolder: self.presenter.dialogFolder)
+    }
 
     // Where a favorite is added and removed. Weak on the presenter: the centre outlives the
     // agent, and an agent that has stopped must not keep it alive.
     presenter.favoritesEditor = config
     configChanged(config)
+    pinsChanged()
     // The first read, so the first menu that opens has something in it. Everything after it is
     // a confirmed dialog or a change of the privacy state.
     recents?.refresh(policy.state)
@@ -277,6 +323,16 @@ final class DialogAgent {
     // automatic chance is spent and a folder changing under an open dialog is not an edit's job.
     resolutions.configChanged(config.model)
   }
+
+  /// The pin moved or its time left ticked down (N4). Resolution takes the live pin for the next
+  /// dialog, and the strip redraws its context zone.
+  func pinsChanged() {
+    resolutions.pinChanged(pins.resolverPin)
+    presenter.pinsChanged()
+  }
+
+  /// The folder of the dialog under the strip, as the last reading named it.
+  var dialogFolder: String? { presenter.dialogFolder }
 
   /// A favorite chosen outside a dialog surface, which is the menu bar. False when no dialog is
   /// under the strip, and then the caller does the other half of S1.

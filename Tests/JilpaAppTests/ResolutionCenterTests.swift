@@ -89,6 +89,8 @@ private func center(
     home: home, places: edge(present: present), now: { now },
     timeZone: { TimeZone(identifier: "UTC") ?? .gmt })
   center.configChanged(model)
+  // The pin reaches the centre from the pin centre, which reads it out of the same model.
+  center.pinChanged(model.resolverPin(home: home))
   return center
 }
 

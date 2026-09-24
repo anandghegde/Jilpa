@@ -452,4 +452,32 @@ struct ConfigPinTests {
       ConfigLoader.load(handOwned: nil, managed: "schema = 1\n[pin]\nfolder = \"~/Desk/\"").model)
     #expect(folder.resolverPin(home: "/Users/me") == Pin(target: .folder("/Users/me/Desk"), expiry: .untilChanged))
   }
+
+  /// Whether a pin is live is the clock's question, asked by whoever holds the pin; the model
+  /// hands back what the file says, ended or not.
+  @Test("the stored pin comes back as chosen, even once its time has passed")
+  func storedPin() throws {
+    let managed = "schema = 1\n[pin]\nfolder = \"~/A\"\nexpires = 2000-01-01T00:00:00Z"
+    let model = try #require(ConfigLoader.load(handOwned: nil, managed: managed).model)
+    let stored = try #require(model.storedPin(home: "/Users/me"))
+    #expect(stored.choice == .folder("/Users/me/A"))
+    #expect(stored.expiry == .until(Date(timeIntervalSince1970: 946_684_800)))
+    #expect(ConfigModel().storedPin(home: "/Users/me") == nil)
+  }
+
+  @Test("a pin on a context is named by what the files say now, and one on no context is none")
+  func summaries() throws {
+    let model = try #require(ConfigLoader.load(handOwned: architectureExample, managed: nil).model)
+    #expect(model.contextRefs.map(\.id).contains("acme"))
+    #expect(
+      model.pinSummary(.context("acme"), expiry: .untilQuit)
+        == PinSummary(choice: .context("acme"), name: "Acme", expiry: .untilQuit))
+    #expect(model.pinSummary(.context("gone"), expiry: .untilChanged) == nil)
+    #expect(model.resolverPin(.context("gone"), expiry: .untilChanged) == nil)
+    #expect(
+      model.pinSummary(.folder("/Users/me/Scratch"), expiry: .untilChanged)
+        == PinSummary(
+          choice: .folder("/Users/me/Scratch"), name: "Scratch", path: "/Users/me/Scratch",
+          expiry: .untilChanged))
+  }
 }

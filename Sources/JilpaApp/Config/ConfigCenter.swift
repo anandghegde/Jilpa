@@ -162,6 +162,36 @@ public final class ConfigCenter: FavoritesEditing {
     favorites.first { $0.path == path }
   }
 
+  // MARK: - The pin
+
+  /// Writes `[pin]` into `managed.toml`, or takes it out with nil (N4).
+  ///
+  /// `expires` nil is a pin until the user changes it. A pin until Jilpa quits is never passed
+  /// here: it is not written down, which is how a relaunch starts without it. A folder is written
+  /// under `~` when it is under the home folder, as a favorite is.
+  public func writePin(_ choice: PinChoice?, expires: Date?) throws(ConfigEditError) {
+    var entry: PinEntry?
+    switch choice {
+    case .none:
+      entry = nil
+    case .context(let id):
+      entry = PinEntry(target: .context(id), expires: expires)
+    case .folder(let path):
+      // An absolute path always makes a FolderPath; one that does not is nothing to pin.
+      guard let folder = try? FolderPath(Self.abbreviating(path, home: home)) else { return }
+      entry = PinEntry(target: .folder(folder), expires: expires)
+    }
+    // To the second, as the file keeps it, so writing the pin the file already holds is no edit.
+    var probe = ConfigFile()
+    probe.pin = entry
+    let stored = ConfigSerializer.storable(probe).pin
+    try edit { file in
+      guard file.pin != stored else { return false }
+      file.pin = stored
+      return true
+    }
+  }
+
   // MARK: -
 
   /// One edit to `managed.toml`, applied here as soon as it is on disk.

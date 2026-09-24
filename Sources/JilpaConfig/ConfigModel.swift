@@ -87,16 +87,46 @@ public struct ConfigModel: Sendable, Equatable {
 
   /// The stored pin in the form resolution takes. Expiry is the resolver's check, not this one's.
   public func resolverPin(home: String) -> Pin? {
+    storedPin(home: home).flatMap { resolverPin($0.choice, expiry: $0.expiry) }
+  }
+
+  /// The stored pin as the user chose it, with `~` expanded. A timed pin whose time has passed is
+  /// still returned: whether it is live is a question about the clock, asked by whoever holds it.
+  public func storedPin(home: String) -> (choice: PinChoice, expiry: Pin.Expiry)? {
     guard let pin else { return nil }
     let expiry: Pin.Expiry = pin.expires.map(Pin.Expiry.until) ?? .untilChanged
     switch pin.target {
+    case .context(let id): return (.context(id), expiry)
+    case .folder(let path): return (.folder(path.expanded(home: home)), expiry)
+    }
+  }
+
+  /// A pin on this choice in the form resolution takes. Nil for a context the files no longer
+  /// name: a pin on nothing holds nothing, and the merger has already warned about it.
+  public func resolverPin(_ choice: PinChoice, expiry: Pin.Expiry) -> Pin? {
+    switch choice {
     case .context(let id):
       guard let context = context(id) else { return nil }
       return Pin(target: .context(context.ref), expiry: expiry)
     case .folder(let path):
-      return Pin(target: .folder(path.expanded(home: home)), expiry: expiry)
+      return Pin(target: .folder(path), expiry: expiry)
     }
   }
+
+  /// A pin on this choice as the surfaces draw it, named by what the files say now.
+  public func pinSummary(_ choice: PinChoice, expiry: Pin.Expiry) -> PinSummary? {
+    switch choice {
+    case .context(let id):
+      guard let context = context(id) else { return nil }
+      return PinSummary(choice: choice, name: context.name, expiry: expiry)
+    case .folder(let path):
+      let folder = PinnableFolder(path: path)
+      return PinSummary(choice: choice, name: folder.name, path: path, expiry: expiry)
+    }
+  }
+
+  /// The contexts as a pin menu offers them, in the merged order.
+  public var contextRefs: [ContextRef] { contexts.map(\.value.ref) }
 }
 
 public struct ConfigLoad: Sendable, Equatable {

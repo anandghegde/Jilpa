@@ -72,8 +72,14 @@ public struct Pin: Sendable, Hashable {
   public enum Expiry: Sendable, Hashable {
     case untilChanged
     case until(Date)
-    /// Cleared at launch by the context engine, so a pin that is still here is live.
+    /// Held in memory by the context engine and never written down, so a relaunch starts without
+    /// it and a pin that is still here is live.
     case untilQuit
+
+    public func isLive(at date: Date) -> Bool {
+      if case .until(let end) = self { return date < end }
+      return true
+    }
   }
   public var target: Target
   public var expiry: Expiry
@@ -83,10 +89,7 @@ public struct Pin: Sendable, Hashable {
     self.expiry = expiry
   }
 
-  public func isLive(at date: Date) -> Bool {
-    if case .until(let end) = expiry { return date < end }
-    return true
-  }
+  public func isLive(at date: Date) -> Bool { expiry.isLive(at: date) }
 }
 
 /// Everything that can name the active context. Precedence is the PRD's: the pin, then sensed
