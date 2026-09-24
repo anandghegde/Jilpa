@@ -6,9 +6,9 @@
 import AppKit
 import JilpaCore
 
-/// Menu bar presence (S1). It carries the version, Quit, the favorites (D4), the recents with
-/// their pins (D5), Finder's open windows (D7), the context pin (N4), private mode and the
-/// per-app pause (D18).
+/// Menu bar presence (S1). It carries the version, Quit, what needs attention (S11), the
+/// favorites (D4), the recents with their pins (D5), Finder's open windows (D7), the context pin
+/// (N4), private mode and the per-app pause (D18).
 ///
 /// The controller holds no policy. It is told what the favorites and the recents are and
 /// reports which one was chosen; whether that means navigating the dialog in front or opening a
@@ -44,6 +44,8 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     get { pinMenu.onPin }
     set { pinMenu.onPin = newValue }
   }
+  /// A health row's fix chosen (S11). The app opens the place; the menu only says which.
+  public var onFixHealth: ((HealthFix) -> Void)?
   /// Release Pin, from the menu bar.
   public var onReleaseContextPin: (() -> Void)? {
     get { pinMenu.onRelease }
@@ -65,6 +67,11 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   /// pin is configuration, and it is there for the next dialog whenever that comes.
   private var pins = PinOffer()
   private let pinMenu = PinMenu()
+  /// What needs attention now, most severe first (S11).
+  private var health: [HealthIssue] = []
+  /// A problem appeared since the menu was last opened. The icon says so until it is: that is
+  /// the one notice a state change gets, and opening the menu is the user having seen it.
+  private var unseen = false
 
   public init(version: String) {
     self.version = version
@@ -122,11 +129,37 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     rebuild()
   }
 
+  /// What needs attention, and which of it is new (S11). A new problem is one notice: the
+  /// icon changes and VoiceOver hears it once. Nothing prompts, nothing opens by itself, and a
+  /// problem that stays is not announced again.
+  public func setHealth(_ issues: [HealthIssue], raised: [HealthIssue]) {
+    guard issues != health || !raised.isEmpty else { return }
+    health = issues
+    if !raised.isEmpty {
+      unseen = true
+    }
+    if !raised.isEmpty, let button = item.button {
+      NSAccessibility.post(
+        element: button, notification: .announcementRequested,
+        userInfo: [
+          .announcement: raised.map(HealthWords.announcement).joined(separator: ". "),
+          .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+        ])
+    }
+    if health.isEmpty { unseen = false }
+    drawButton()
+    rebuild()
+  }
+
   /// A menu about to open is rebuilt anyway, so a change that arrived while the menu bar was
   /// being clicked cannot be a click on a stale row. The app is asked first: the recents it
   /// hands back are then the ones this opening shows.
   public func menuNeedsUpdate(_ menu: NSMenu) {
     onMenuOpen?()
+    if unseen {
+      unseen = false
+      drawButton()
+    }
     rebuild()
   }
 
@@ -134,12 +167,16 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   /// remembers, and a mode the user has forgotten is on is one that quietly records nothing.
   private func drawButton() {
     let on = controls?.privateMode == true
-    let symbol = on ? "folder.badge.minus" : "folder.badge.gearshape"
+    // A problem not yet seen outranks private mode on the icon: private mode is a state the
+    // user chose, and the problem is news they have not had.
+    let symbol =
+      unseen ? "exclamationmark.triangle" : on ? "folder.badge.minus" : "folder.badge.gearshape"
+    let description =
+      unseen
+      ? String(localized: "Jilpa, needs attention")
+      : on ? String(localized: "Jilpa, private mode on") : String(localized: "Jilpa")
     item.button?.image =
-      NSImage(
-        systemSymbolName: symbol,
-        accessibilityDescription: on
-          ? String(localized: "Jilpa, private mode on") : String(localized: "Jilpa"))
+      NSImage(systemSymbolName: symbol, accessibilityDescription: description)
       ?? NSImage(
         systemSymbolName: "folder.badge.gearshape",
         accessibilityDescription: String(localized: "Jilpa"))
@@ -151,6 +188,7 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       title: String(localized: "Jilpa \(version)"), action: nil, keyEquivalent: "")
     about.isEnabled = false
     menu.addItem(about)
+    addHealth()
 
     if !favorites.isEmpty {
       menu.addItem(.separator())
@@ -227,6 +265,38 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         keyEquivalent: "q"
       )
     )
+  }
+
+  /// What needs attention, first in the menu because it is what explains everything below it
+  /// (S11). A row with somewhere to go opens it; one without is there to be read.
+  private func addHealth() {
+    guard !health.isEmpty else { return }
+    menu.addItem(.separator())
+    let heading = NSMenuItem(
+      title: String(localized: "Needs Attention"), action: nil, keyEquivalent: "")
+    heading.isEnabled = false
+    menu.addItem(heading)
+    for issue in health {
+      let row = NSMenuItem(title: HealthWords.title(issue), action: nil, keyEquivalent: "")
+      row.indentationLevel = 1
+      row.subtitle = HealthWords.detail(issue)
+      row.image = NSImage(
+        systemSymbolName: HealthWords.symbol(issue.severity), accessibilityDescription: nil)
+      if let fix = issue.fix {
+        row.target = self
+        row.action = #selector(healthFixPressed(_:))
+        row.representedObject = fix.rawValue
+      } else {
+        row.isEnabled = false
+      }
+      menu.addItem(row)
+    }
+  }
+
+  @objc private func healthFixPressed(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let fix = HealthFix(rawValue: raw)
+    else { return }
+    onFixHealth?(fix)
   }
 
   /// The windows, or the one row that says why there are none (D7). Denied is said and not

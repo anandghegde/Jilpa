@@ -38,6 +38,9 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   private var config: ConfigCenter?
   private var pins: PinCenter?
   private var agent: DialogAgent?
+  /// What needs attention (S11), and the grant it starts from.
+  private var health: HealthCenter?
+  private var trust: AccessibilityTrustWatch?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Before any AX call: a timeout set per app element does not reach the elements that app vends.
@@ -64,6 +67,9 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     // The recents are taken as the menu opens, not held between openings: the gate is asked
     // again each time, because private mode may have moved since the last one (S1, contract 7).
     statusItem.onMenuOpen = { [weak self] in
+      // Some inputs move without telling anyone: a hotkey the keyboard cannot hold, a Finder
+      // read that failed. The menu opening is a cheap moment to ask again.
+      self?.health?.refresh()
       self?.statusItem?.setRecents(self?.agent?.menuRecents() ?? [])
       // Which app is in front is read as the menu opens too: the pause row is about that app,
       // and the menu bar takes no key status, so it is still the one the user was in.
@@ -100,6 +106,8 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     // One listener for the whole fan-out, so the surfaces cannot disagree about the order they
     // were told in. The agent may not exist; the menu bar always does.
     config.onChange { [weak self] change in
+      // Errors and warnings are the health view's whatever else moved.
+      defer { self?.health?.refresh() }
       guard change.contains(.model) else { return }
       self?.statusItem?.setFavorites(config.favorites)
       self?.agent?.configChanged(config)
@@ -108,10 +116,30 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
       self?.pins?.configChanged(config.model)
     }
 
-    // Nothing is observed until the Accessibility permission is granted. Onboarding, which
-    // asks for it and waits for the grant, is WP7; until then a launch without it is a menu bar
-    // item and nothing else.
-    guard AXTrust.isTrusted else { return }
+    // The health view (S11). It reads the parts that already know and says what is off, with
+    // the one fix each has; the menu bar shows it and the icon says when something is new.
+    let health = HealthCenter { [weak self] in self?.healthInputs() ?? HealthInputs() }
+    self.health = health
+    health.onChange { [weak self] issues, raised in
+      self?.statusItem?.setHealth(issues, raised: raised)
+    }
+    statusItem.onFixHealth = { [weak self] fix in self?.fix(fix) }
+
+    // Nothing is observed until the Accessibility permission is granted, and everything stops
+    // the moment it is taken away: a grant is a notification, never a poll.
+    let trust = AccessibilityTrustWatch()
+    self.trust = trust
+    trust.start { [weak self] trusted in
+      if trusted { self?.startAgent() } else { self?.stopAgent() }
+      self?.health?.refresh()
+    }
+    if trust.isTrusted { startAgent() }
+    health.refresh()
+  }
+
+  /// Everything that watches dialogs, made when the grant is there and not before.
+  private func startAgent() {
+    guard agent == nil, let config, let pins, let statusItem else { return }
     let agent = DialogAgent(config: config, pins: pins)
     self.agent = agent
     // A menu already on screen when a dialog was confirmed does not go on showing the list it
@@ -123,9 +151,66 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     agent.onControlsChange = { [weak self] in
       self?.statusItem?.setControls(self?.agent?.menuControls())
     }
-    agent.onFinderWindowsChange = { [weak self] in self?.showFinderWindows() }
+    agent.onFinderWindowsChange = { [weak self] in
+      self?.showFinderWindows()
+      self?.health?.refresh()
+    }
     statusItem.setControls(agent.menuControls())
     agent.start()
+  }
+
+  /// The grant was taken away. Every observer, hotkey and panel goes at once: a live watcher
+  /// under a revoked grant can stall input, and nothing it would read is allowed any more. The
+  /// menu bar keeps the configuration, which needs no grant.
+  private func stopAgent() {
+    guard let agent else { return }
+    agent.stop()
+    self.agent = nil
+    statusItem?.setControls(nil)
+    statusItem?.setRecents([])
+    statusItem?.setFinderWindows([], automation: nil)
+    showPins()
+  }
+
+  /// What the health view is worked out from, read now from the parts that already know. With
+  /// no grant the rest is not asked: nothing is watched, so it is not yet a question.
+  private func healthInputs() -> HealthInputs {
+    guard trust?.isTrusted == true else { return HealthInputs(accessibilityTrusted: false) }
+    var inputs = HealthInputs(
+      configErrors: config?.notice.count ?? 0, configWarnings: config?.warnings.count ?? 0)
+    if let agent {
+      inputs.compatibility = agent.compatibilityStatus
+      inputs.storeAvailable = agent.hasStore
+      inputs.finderAutomation = agent.finderAutomation
+      inputs.finderFailure = agent.finderFailure
+      inputs.unheldHotkeys = agent.unheldHotkeys
+      inputs.shadowedFavoriteHotkeys = agent.shadowedFavoriteHotkeys
+    }
+    return inputs
+  }
+
+  /// A health row's fix, which is always a place to go and never something done for the user.
+  /// Every one of them activates the app it opens, System Settings or Finder, and never Jilpa.
+  private func fix(_ fix: HealthFix) {
+    switch fix {
+    case .accessibilitySettings:
+      // The system's own prompt, which adds Jilpa to the list and offers to open it. This is a
+      // click of the user's, so it is the one prompt the health view may show; the grant that
+      // follows arrives as a notification and starts the agent.
+      if !AXTrust.requestWithPrompt() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+      }
+    case .automationSettings:
+      open("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+    case .configFolder:
+      guard let directory = config?.store.directory else { return }
+      NSWorkspace.shared.open(directory)
+    }
+  }
+
+  private func open(_ address: String) {
+    guard let url = URL(string: address) else { return }
+    NSWorkspace.shared.open(url)
   }
 
   /// The pin as the menu bar shows it: the contexts, and the folder of the dialog under the
@@ -173,6 +258,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    trust?.stop()
     agent?.stop()
     pins?.stop()
     config?.stop()
@@ -347,6 +433,28 @@ final class DialogAgent {
 
   /// The folder of the dialog under the strip, as the last reading named it.
   var dialogFolder: String? { presenter.dialogFolder }
+
+  // MARK: - What the health view reads (S11)
+
+  /// Whether the compatibility bundle in force can be used. No bundle at all is every dialog
+  /// unlisted; one in force that is not the current one is data that failed to verify.
+  var compatibilityStatus: CompatibilityStatus {
+    let store = compat.store
+    guard store.active != nil else { return .unavailable }
+    let rejected = store.loadReport.notes.contains { note in
+      switch note {
+      case .currentRejected, .previousRejected, .bundledRejected: true
+      case .bundledMissing, .file: false
+      }
+    }
+    return rejected || store.loadReport.source == .previous ? .fellBack : .active
+  }
+
+  var hasStore: Bool { store != nil }
+  var finderAutomation: FinderAutomation? { finders.automation }
+  var finderFailure: Int? { finders.failure }
+  var unheldHotkeys: Int { hotkeys.unheld.count }
+  var shadowedFavoriteHotkeys: Int { hotkeys.shadowedFavorites.count }
 
   /// A favorite chosen outside a dialog surface, which is the menu bar. False when no dialog is
   /// under the strip, and then the caller does the other half of S1.

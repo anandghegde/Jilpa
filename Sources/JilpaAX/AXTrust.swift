@@ -8,7 +8,8 @@ public enum AXTrust {
   }
 
   /// Checks trust and, if missing, shows the system prompt that opens Privacy & Security.
-  /// Onboarding is the only caller; health checks use `isTrusted` so they never prompt.
+  /// Only a click of the user's calls it — onboarding, and the health view's fix row; the checks
+  /// themselves use `isTrusted` so they never prompt.
   @discardableResult
   public static func requestWithPrompt() -> Bool {
     // The key is kAXTrustedCheckOptionPrompt, spelled out because the imported global is a
