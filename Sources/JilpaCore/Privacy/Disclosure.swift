@@ -64,5 +64,8 @@ public enum PrivacyDisclosure {
     // Finder's windows are what the user already has open, and private mode does not list them
     // among the sensing it stops (architecture, Gaps, item 13, which awaits the owner).
     DisclosureItem("sensed.finderWindows", .sensed, inPrivateMode: .unchanged),
+    // The sensed project (N5): Terminal's shells and the `.git` above them, read under a
+    // developer-context permit that private mode, a pause and an exclusion all refuse.
+    DisclosureItem("sensed.developerContext", .sensed),
   ]
 }

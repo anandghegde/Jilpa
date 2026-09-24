@@ -63,12 +63,16 @@ public struct PanelContents: Sendable, Equatable {
   /// The pin in force and what could be pinned instead (N4). The context zone draws it: the
   /// pin with its time left when there is one, a pin symbol when there is only something to pin.
   public var pin: PinOffer
+  /// The sensed project (N5), already past the gate. The context zone draws it while no pin is
+  /// in force: the project's name, or why there is none, or that the tool is not supported.
+  public var project: ProjectOffer?
 
   public init(
     destination: String, isEnabled: Bool, notice: Notice? = nil,
     history: HistoryState = HistoryState(), favorites: [FavoritePlace] = [],
     folder: String? = nil, favoriteHere: FavoriteID? = nil, recents: [RecentPlace] = [],
-    finderWindows: [FinderWindowPlace] = [], pin: PinOffer = PinOffer()
+    finderWindows: [FinderWindowPlace] = [], pin: PinOffer = PinOffer(),
+    project: ProjectOffer? = nil
   ) {
     self.destination = destination
     self.isEnabled = isEnabled
@@ -80,6 +84,7 @@ public struct PanelContents: Sendable, Equatable {
     self.recents = recents
     self.finderWindows = finderWindows
     self.pin = pin
+    self.project = project
   }
 }
 
@@ -115,6 +120,9 @@ public protocol PanelActions: AnyObject {
   func panelChosePin(_ choice: PinChoice, _ duration: PinDuration)
   /// Release Pin, from the same menu.
   func panelChoseReleasePin()
+  /// A folder of the sensed project chosen from the context zone (N5), by its path. A folder
+  /// change like any other, through the Navigator.
+  func panelChoseProject(_ path: String)
 }
 
 /// The strip's one window and its contents (D2).
@@ -208,6 +216,10 @@ public final class PanelHost {
   /// The pin as a symbol alone: filled while one is in force, empty while there is only
   /// something to pin.
   let pinIcon: StripButton
+  /// The sensed project's name, or why there is none, while no pin is in force (N5).
+  let projectButton: StripButton
+  let projectIcon: StripButton
+  private let projectMenuBuilder = ProjectMenu()
   /// The fuzzy jump, in the same window as the zones and never up at the same time.
   let jump: JumpView
   /// Builds the context zone's menu and is its items' target.
@@ -329,7 +341,15 @@ public final class PanelHost {
     pinButton.setContentCompressionResistancePriority(.defaultLow + 2, for: .horizontal)
     pinButton.setContentHuggingPriority(.required, for: .horizontal)
     pinIcon = Self.iconButton(symbol: "pin")
-    contextZone = NSStackView(views: [pinButton, pinIcon])
+    projectButton = StripButton()
+    projectButton.bezelStyle = .accessoryBar
+    projectButton.setButtonType(.momentaryPushIn)
+    projectButton.imagePosition = .imageLeading
+    projectButton.lineBreakMode = .byTruncatingTail
+    projectButton.setContentCompressionResistancePriority(.defaultLow + 2, for: .horizontal)
+    projectButton.setContentHuggingPriority(.required, for: .horizontal)
+    projectIcon = Self.iconButton(symbol: ProjectMenu.symbol)
+    contextZone = NSStackView(views: [pinButton, pinIcon, projectButton, projectIcon])
     contextZone.spacing = Self.controlSpacing
 
     zones = NSStackView(views: [historyZone, suggestionZone, noticeZone, menusZone, contextZone])
@@ -393,6 +413,11 @@ public final class PanelHost {
       self?.actions?.panelChosePin(choice, duration)
     }
     pinMenuBuilder.onRelease = { [weak self] in self?.actions?.panelChoseReleasePin() }
+    for control in [projectButton, projectIcon] {
+      control.target = self
+      control.action = #selector(pinPressed)
+    }
+    projectMenuBuilder.onGo = { [weak self] path in self?.actions?.panelChoseProject(path) }
 
     // Reduce Transparency and Increase Contrast can both be turned on while a dialog is open.
     // Subscribed by selector rather than by block, so there is no token to give back: the
@@ -510,6 +535,7 @@ public final class PanelHost {
     // line for VoiceOver whatever the strip's length.
     noticeSymbol.setAccessibilityLabel(next.notice?.text)
     drawPin(next.pin)
+    drawProject(next.project)
     relayout()
     announce(next.notice)
   }
@@ -650,8 +676,16 @@ public final class PanelHost {
     }
 
     // The context zone: the pin's name and time left with its symbol as the smaller drawing, or
-    // the symbol alone while nothing is pinned and something could be.
-    if let pin = contents?.pin, !pin.isEmpty {
+    // the symbol alone while nothing is pinned and something could be. While nothing is pinned,
+    // the sensed project takes the zone, drawn the same two ways.
+    if showsProject != nil {
+      demands.append(
+        horizontal
+          ? ZoneDemand(
+            zone: .context, full: max(projectButton.fittingSize.width, Self.controlLength),
+            icon: Self.controlLength)
+          : ZoneDemand(zone: .context, lengths: [.icon: Self.controlLength]))
+    } else if let pin = contents?.pin, !pin.isEmpty {
       demands.append(
         horizontal && pin.current != nil
           ? ZoneDemand(
@@ -709,8 +743,30 @@ public final class PanelHost {
 
     let context = details[.context] ?? .hidden
     contextZone.isHidden = context == .hidden
-    pinButton.isHidden = context != .full
-    pinIcon.isHidden = context != .icon
+    let project = showsProject != nil
+    pinButton.isHidden = project || context != .full
+    pinIcon.isHidden = project || context != .icon
+    projectButton.isHidden = !project || context != .full
+    projectIcon.isHidden = !project || context != .icon
+  }
+
+  /// The project the context zone shows: only while no pin is in force, because a pin beats
+  /// sensed context (contract 4) and the zone says what the next resolution will use.
+  private var showsProject: ProjectOffer? {
+    guard let contents, contents.pin.current == nil else { return nil }
+    return contents.project
+  }
+
+  private func drawProject(_ offer: ProjectOffer?) {
+    guard let offer else { return }
+    projectButton.title = ProjectMenu.title(offer)
+    projectButton.image = ProjectMenu.image(offer)
+    projectIcon.image = ProjectMenu.image(offer)
+    let label = ProjectMenu.label(offer)
+    for control in [projectButton, projectIcon] {
+      control.setAccessibilityLabel(label)
+      control.toolTip = label
+    }
   }
 
   /// The context zone's words and symbols for this offer. The name and the time left are the
@@ -879,8 +935,7 @@ public final class PanelHost {
         title: place.name, action: #selector(recentPressed(_:)), keyEquivalent: "")
       item.target = self
       item.representedObject = place.path
-      item.image = NSImage(
-        systemSymbolName: place.pinned ? "pin.fill" : "folder", accessibilityDescription: nil)
+      item.image = RecentSymbol.image(place, otherwise: "folder")
       // The parent folder, so two recents with the same name are still told apart. No chord:
       // a recent is not a binding, and the fuzzy jump is the keyboard path to one.
       item.subtitle = place.detail
@@ -923,11 +978,16 @@ public final class PanelHost {
     menu.popUp(positioning: nil, at: corner, in: sender)
   }
 
-  /// The pin menu as it stands right now. Nil when there is nothing pinned and nothing to pin.
+  /// The context zone's menu as it stands right now: the sensed project's folders or its
+  /// reason while nothing is pinned, then the pin's items. Nil when there is nothing to show.
   func pinMenu() -> NSMenu? {
-    guard let contents, !contents.pin.isEmpty else { return nil }
+    guard let contents else { return nil }
+    let project = showsProject.map(projectMenuBuilder.items) ?? []
+    guard !project.isEmpty || !contents.pin.isEmpty else { return nil }
     let menu = NSMenu()
     menu.autoenablesItems = false
+    for item in project { menu.addItem(item) }
+    if !project.isEmpty, !contents.pin.isEmpty { menu.addItem(.separator()) }
     for item in pinMenuBuilder.items(contents.pin) { menu.addItem(item) }
     return menu
   }

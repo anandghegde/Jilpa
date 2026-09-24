@@ -467,6 +467,75 @@ struct PanelHostTests {
     #expect(listener.pins.map(\.1) == [.hours(4), .untilQuit])
   }
 
+  // MARK: - The sensed project
+
+  private let jilpaProject = ProjectOffer(
+    .known(
+      name: "jilpa",
+      folders: [
+        PinnableFolder(path: "/Users/ada/src/jilpa", name: "jilpa"),
+        PinnableFolder(path: "/Users/ada/src/jilpa/docs"),
+      ]))
+
+  /// With nothing pinned the context zone is the project: its name, and a menu of its folders
+  /// above the pin's own items (N5).
+  @Test func theContextZoneShowsTheProjectWhileNothingIsPinned() throws {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(
+        destination: "jilpa", isEnabled: true,
+        pin: PinOffer(folders: [PinnableFolder(path: "/Users/ada/src/jilpa")]),
+        project: jilpaProject),
+      at: placement(.below))
+    #expect(host.details[.context] == .full)
+    #expect(!host.projectButton.isHidden && host.pinButton.isHidden && host.pinIcon.isHidden)
+    #expect(host.projectButton.title == "jilpa")
+    #expect(host.projectButton.accessibilityLabel() == "Project: jilpa")
+    #expect(host.projectButton.toolTip == host.projectButton.accessibilityLabel())
+
+    let menu = try #require(host.pinMenu())
+    #expect(menu.items.map(\.title) == ["Project: jilpa", "jilpa", "docs", "", "Pin jilpa"])
+    #expect(!menu.items[0].isEnabled)
+    press(menu.items[2])
+    #expect(listener.projects == ["/Users/ada/src/jilpa/docs"])
+  }
+
+  /// Unknown and unsupported are said as such and offer nothing to go to.
+  @Test func anUnknownProjectIsSaidAndOffersNothing() throws {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Downloads", isEnabled: true, project: ProjectOffer(.unknown(.tabsDisagree))),
+      at: placement(.below))
+    #expect(host.projectButton.title == "Project unknown")
+    #expect(
+      host.projectButton.accessibilityLabel()
+        == "Project unknown: Terminal tabs are in different projects")
+    let menu = try #require(host.pinMenu())
+    #expect(menu.items.count == 1 && !menu.items[0].isEnabled)
+
+    host.update(
+      PanelContents(
+        destination: "Downloads", isEnabled: true,
+        project: ProjectOffer(.unsupported(appName: "Visual Studio Code"))))
+    #expect(host.projectButton.title == "Visual Studio Code: not supported")
+  }
+
+  /// A pin beats sensed context: while one is in force the zone is the pin.
+  @Test func aPinInForceHidesTheProject() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(
+        destination: "Invoices", isEnabled: true,
+        pin: PinOffer(current: acmePin, remaining: .hours(2), contexts: [acme]),
+        project: jilpaProject),
+      at: placement(.below))
+    #expect(!host.pinButton.isHidden && host.projectButton.isHidden && host.projectIcon.isHidden)
+    #expect(host.pinMenu()?.items.first?.title == "Pinned: Acme")
+  }
+
   private let acme = ContextRef(id: "acme", name: "Acme")
   private let acmePin = PinSummary(choice: .context("acme"), name: "Acme", expiry: .untilChanged)
 
@@ -956,4 +1025,6 @@ private final class Listener: PanelActions {
     pins.append((choice, duration))
   }
   func panelChoseReleasePin() { releases += 1 }
+  var projects: [String] = []
+  func panelChoseProject(_ path: String) { projects.append(path) }
 }

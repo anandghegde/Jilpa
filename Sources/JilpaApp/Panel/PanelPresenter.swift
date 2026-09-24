@@ -6,6 +6,7 @@ import JilpaConfig
 import JilpaCore
 import JilpaDialog
 import JilpaNavigator
+import JilpaSensors
 import JilpaUI
 
 /// The walking skeleton's panel: the coordinator's stream in, the strip beside the dialog, and
@@ -123,6 +124,14 @@ public final class PanelPresenter: PanelActions {
   /// The pin (N4). Weak and optional like the rest: without one the strip draws no context zone,
   /// and resolution is told about the pin by whoever holds it, not through the strip.
   public weak var pins: (any PinSource)?
+
+  /// The sensed project (N5). Weak and optional like the rest: without one the strip offers no
+  /// project, which is what no developer tool running looks like.
+  public weak var projects: (any ProjectSource)?
+
+  /// Whether a folder is a git root, asked only under a developer-context permit. A closure so
+  /// the presenter can be exercised without a disk.
+  public var gitRoot: @Sendable (URL, SensePermit) -> Bool = { TerminalReader.isGitRoot($0, permit: $1) }
 
   /// The window the cycle hotkey last went to in each dialog, so the next press goes to the one
   /// after it. It ends with the dialog, as the trail does.
@@ -361,8 +370,17 @@ public final class PanelPresenter: PanelActions {
     // press before it still running.
     pending = nil
     guard let shown else { return }
-    let folder = shown.suggestion ?? destination
-    pending = Task { await self.move(shown, to: folder, trigger: .manual(.panelButton)) }
+    let (folder, source) = buttonTarget(shown)
+    pending = Task { await self.move(shown, to: folder, trigger: .manual(source)) }
+  }
+
+  /// Where the button goes: what resolution named; else, with nothing pinned, the sensed
+  /// project's root (N5); else the folder the presenter was built with. The project never
+  /// displaces a destination a rule, a default or a pin named (contracts 4 and 5).
+  private func buttonTarget(_ shown: Shown) -> (URL, ManualSource) {
+    if let suggestion = shown.suggestion { return (suggestion, .panelButton) }
+    if let root = sensedRoot(shown) { return (root, .project) }
+    return (destination, .panelButton)
   }
 
   /// Back, Forward or Return to original folder, pressed on the strip.
@@ -505,13 +523,22 @@ public final class PanelPresenter: PanelActions {
   /// Called from `.ended` and from nowhere else. A dialog that closed with no outcome, or with
   /// one nobody watched, reaches here and adds nothing, which is the point of asking.
   private func recordUse(_ dialog: ObservedDialog) async {
-    guard let uses, let app = dialog.app.app, let place = trails[dialog.id]?.place,
+    guard let uses, let app = dialog.app.app, var place = trails[dialog.id]?.place,
       case .ended(let outcome) = dialog.session.phase,
       let use = DestinationUse.confirmed(
         app: app, purpose: dialog.session.descriptor.purpose, outcome: outcome,
         filename: dialog.session.snapshot?.filename, folder: place, at: Date())
     else { return }
-    guard await uses.record(use, dialog.policy.context) else { return }
+    // Whether the folder is a git root is developer context (N5), so it is looked at only under
+    // that sensor's permit, and only for a use that is going to be written anyway.
+    var marked = use
+    if let permit = PrivacyGate().permit(.developerContext, dialog.policy.context) {
+      let gitRoot = gitRoot
+      let folder = URL(fileURLWithPath: place.path, isDirectory: true)
+      place.isGitRoot = await Task.detached(priority: .utility) { gitRoot(folder, permit) }.value
+      marked.location = place
+    }
+    guard await uses.record(marked, dialog.policy.context) else { return }
     // Only once a row is really stored. The menus read a cache, and a refresh that follows a
     // write nobody made would be a read the user's next dialog pays for and learns nothing by.
     recentsSource?.refresh(dialog.policy.context.state)
@@ -585,6 +612,38 @@ public final class PanelPresenter: PanelActions {
   }
 
   public func panelChoseFinderWindow(_ path: String) { goToFinderWindow(path) }
+
+  // MARK: - The sensed project
+
+  /// The project a surface over this dialog may show, already past the gate. Nothing until
+  /// the dialog's first reading, like the recents.
+  private func projectOffer(for shown: Shown) -> ProjectOffer? {
+    guard let projects, let policy = shown.policy else { return nil }
+    return projects.offer(policy: policy)
+  }
+
+  /// The sensed project's root, only while nothing is pinned: a pin beats sensed context.
+  private func sensedRoot(_ shown: Shown) -> URL? {
+    if pins?.offer(folders: []).current != nil { return nil }
+    guard let root = projectOffer(for: shown)?.folders.first else { return nil }
+    return URL(fileURLWithPath: root.path, isDirectory: true)
+  }
+
+  /// The sensed project changed. The strip redraws from it; nothing is sent.
+  public func projectsChanged() { apply() }
+
+  /// A folder of the sensed project, chosen on the strip or in the fuzzy jump (N5). The same
+  /// request to the Navigator as a recent; a folder gone since is refused with a reason.
+  @discardableResult
+  public func goToProjectFolder(_ path: String) -> Bool {
+    pending = nil
+    guard let shown else { return false }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    pending = Task { await self.move(shown, to: url, trigger: .manual(.project)) }
+    return true
+  }
+
+  public func panelChoseProject(_ path: String) { goToProjectFolder(path) }
 
   /// The cycle hotkey (D7). `HotkeyCenter` answers `.cycleWindows` with this.
   ///
@@ -884,8 +943,16 @@ public final class PanelPresenter: PanelActions {
 
   private func contents(_ shown: Shown) -> PanelContents {
     let trail = trails[shown.id]
+    let project = projectOffer(for: shown)
+    // The dialog's own folder is the ad hoc project the strip offers: it is the folder the
+    // user is looking at, and the one place that knows it is this dialog's reading. The sensed
+    // project's root is the other.
+    var pinnable = trail?.place.map { [PinnableFolder(path: $0.path)] } ?? []
+    if let root = project?.folders.first, !pinnable.contains(where: { $0.path == root.path }) {
+      pinnable.append(root)
+    }
     return PanelContents(
-      destination: (shown.suggestion ?? destination).lastPathComponent, isEnabled: shown.isEnabled,
+      destination: buttonTarget(shown).0.lastPathComponent, isEnabled: shown.isEnabled,
       notice: shown.line.current,
       history: HistoryState(
         back: canMove(.back), forward: canMove(.forward),
@@ -894,10 +961,7 @@ public final class PanelPresenter: PanelActions {
       favoriteHere: trail?.place?.key.flatMap(favorite(at:)),
       recents: recents(for: shown, in: appScope(shown), limit: RecentsCenter.menuLimit),
       finderWindows: finderWindows(for: shown),
-      // The dialog's own folder is the ad hoc project the strip offers: it is the folder the
-      // user is looking at, and the one place that knows it is this dialog's reading.
-      pin: pins?.offer(folders: trail?.place.map { [PinnableFolder(path: $0.path)] } ?? [])
-        ?? PinOffer())
+      pin: pins?.offer(folders: pinnable) ?? PinOffer(), project: project)
   }
 
   /// Which favorite is this folder, if one of them is. By key, never by path: two paths can
@@ -918,7 +982,7 @@ public final class PanelPresenter: PanelActions {
   /// somewhere in the listing themselves.
   private func noteSession(_ session: DialogSession) {
     if case .navigating = session.phase {
-      shown?.line.show(.working, going(to: moving ?? shown?.suggestion ?? destination))
+      shown?.line.show(.working, going(to: moving ?? shown.map { buttonTarget($0).0 } ?? destination))
     } else {
       shown?.line.clear(.working)
     }
@@ -1329,6 +1393,18 @@ public final class PanelPresenter: PanelActions {
         path: destination.path, title: destination.lastPathComponent,
         detail: destination.deletingLastPathComponent().path, source: .suggestion)
     ]
+    // The sensed project's folders, root first: the folders of what the user is working on.
+    // Only while nothing is pinned, like the strip.
+    if pins?.offer(folders: []).current == nil {
+      for folder in projectOffer(for: target)?.folders ?? []
+      where !rows.contains(where: { $0.path == folder.path }) {
+        let url = URL(fileURLWithPath: folder.path, isDirectory: true)
+        rows.append(
+          JumpRow(
+            path: folder.path, title: folder.name,
+            detail: url.deletingLastPathComponent().path, source: .project))
+      }
+    }
     // The favorites next, in the configuration's order: they are the folders the user named,
     // and the field is the fastest way to one of them. A path already in the list is not
     // offered twice, which is tidiness and not folder equality: the worst a miss here costs is

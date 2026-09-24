@@ -80,11 +80,15 @@ public struct RecentPlace: Sendable, Hashable {
   /// The folder's own name, which is what the user recognises it by.
   public var name: String
   public var pinned: Bool
+  /// The folder held a `.git` when a use of it was recorded (N5). Only ever set under a permit
+  /// for developer context; a mark, not a claim that it is still one.
+  public var isGitRoot: Bool
 
-  public init(path: String, name: String, pinned: Bool = false) {
+  public init(path: String, name: String, pinned: Bool = false, isGitRoot: Bool = false) {
     self.path = path
     self.name = name
     self.pinned = pinned
+    self.isGitRoot = isGitRoot
   }
 
   /// Where the folder is: the second line everywhere a recent is drawn with two.
@@ -99,6 +103,7 @@ extension RecentEntry {
   public var place: RecentPlace {
     let name = (location.path as NSString).lastPathComponent
     return RecentPlace(
-      path: location.path, name: name.isEmpty ? location.path : name, pinned: pinned)
+      path: location.path, name: name.isEmpty ? location.path : name, pinned: pinned,
+      isGitRoot: location.isGitRoot)
   }
 }

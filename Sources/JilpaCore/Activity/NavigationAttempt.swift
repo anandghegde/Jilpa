@@ -12,6 +12,10 @@ public enum ManualSource: String, Sendable, Hashable, CaseIterable, LogSafe {
   /// A folder an open Finder window shows, from a menu or the cycle hotkey (D7). Its own
   /// source, because the user put that window there and neither named it nor confirmed in it.
   case finderWindow = "finder-window"
+  /// A folder of the sensed project, from the strip's context zone or the panel button while
+  /// the project is its destination (N5). Its own source, because Jilpa sensed it rather than
+  /// the user naming or confirming it.
+  case project
   case quickSearch = "quick-search"
   case hotkey
   case pathEntry = "path-entry"

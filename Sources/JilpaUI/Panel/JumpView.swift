@@ -308,6 +308,7 @@ final class JumpView: NSView, NSTextFieldDelegate {
   static func symbol(for source: JumpSource) -> String {
     switch source {
     case .suggestion: "sparkles"
+    case .project: ProjectMenu.symbol
     case .favorite: "star"
     case .recent: "clock"
     case .window: "macwindow"

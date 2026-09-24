@@ -7,6 +7,8 @@ import Foundation
 /// suggestions first, then favorites, then recents already reads in this order.
 public enum JumpSource: String, Sendable, Hashable, CaseIterable, Codable, LogSafe {
   case suggestion
+  /// A folder of the sensed project (N5).
+  case project
   case favorite
   case recent
   /// A folder an open window of some app is showing.

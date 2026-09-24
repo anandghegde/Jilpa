@@ -188,8 +188,7 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
         // The path, because that is what a navigation takes and what identifies the row here.
         // Two recents can share a name; nothing in this menu compares them by one.
         row.representedObject = place.path
-        row.image = NSImage(
-          systemSymbolName: place.pinned ? "pin.fill" : "clock", accessibilityDescription: nil)
+        row.image = RecentSymbol.image(place, otherwise: "clock")
         row.subtitle = place.detail
         menu.addItem(row)
 

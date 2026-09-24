@@ -210,6 +210,8 @@ final class DialogAgent {
   /// The pin (N4). The app delegate's, because it outlives the grant; the agent hands the live
   /// pin to resolution and the offer to the strip.
   private let pins: PinCenter
+  /// The sensed project (N5), read from Terminal as the user leaves it and comes back to it.
+  private let projects: ProjectCenter
   private var tasks: [Task<Void, Never>] = []
 
   /// The counters moved. The menu bar redraws from this; the strip is the presenter's own.
@@ -227,6 +229,7 @@ final class DialogAgent {
     // and a favorite the strip adds are two edits to one file, and neither may lose the other.
     let policy = PolicyCenter(store: config.store)
     self.policy = policy
+    projects = ProjectCenter.live(state: { policy.state })
     let pool = self.pool
     watcher = DialogWatcher(pool: pool, shouldObserve: policy.shouldObserve)
     coordinator = DialogCoordinator(
@@ -260,6 +263,8 @@ final class DialogAgent {
     recents?.onChange { [weak self] in self?.onRecentsChange?() }
     presenter.finderWindows = finders
     presenter.pins = pins
+    presenter.projects = projects
+    projects.onChange { [weak self] in self?.presenter.projectsChanged() }
     finders.onChange { [weak self] in
       self?.presenter.finderWindowsChanged()
       self?.onFinderWindowsChange?()
@@ -439,6 +444,7 @@ final class DialogAgent {
         // get them back: the cache is only ever as private as the state it was filled under.
         guard let self else { return }
         self.recents?.refresh(self.policy.state)
+        self.projects.policyChanged()
         self.onControlsChange?()
       }
     }
@@ -458,9 +464,11 @@ final class DialogAgent {
     // The first read, so the menu knows whether to offer the windows or to say why not. It asks
     // macOS without prompting and sends Finder nothing unless consent already exists.
     finders.refresh()
+    projects.start()
   }
 
   func stop() {
+    projects.stop()
     hotkeys.stop()
     presenter.stop()
     apps.stop()
