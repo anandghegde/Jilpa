@@ -35,12 +35,14 @@ public struct HealthInputs: Sendable, Equatable {
   public var unheldHotkeys: Int
   /// Favorites whose chord was already spoken for.
   public var shadowedFavoriteHotkeys: Int
+  /// The recent per-app problems, newest first.
+  public var apps: [AppHealth]
 
   public init(
     accessibilityTrusted: Bool = true, configErrors: Int = 0, configWarnings: Int = 0,
     compatibility: CompatibilityStatus = .active, storeAvailable: Bool = true,
     finderAutomation: FinderAutomation? = nil, finderFailure: Int? = nil, unheldHotkeys: Int = 0,
-    shadowedFavoriteHotkeys: Int = 0
+    shadowedFavoriteHotkeys: Int = 0, apps: [AppHealth] = []
   ) {
     self.accessibilityTrusted = accessibilityTrusted
     self.configErrors = configErrors
@@ -51,6 +53,7 @@ public struct HealthInputs: Sendable, Equatable {
     self.finderFailure = finderFailure
     self.unheldHotkeys = unheldHotkeys
     self.shadowedFavoriteHotkeys = shadowedFavoriteHotkeys
+    self.apps = apps
   }
 }
 
@@ -77,9 +80,9 @@ public enum HealthFix: String, Sendable, Hashable, CaseIterable {
   case configFolder = "config-folder"
 }
 
-/// One thing the health view says (S11). Kinds and counts only: nothing here names a path, a
-/// file or a folder, so a health row can be shown, logged and put in a diagnostics bundle as it
-/// is.
+/// One thing the health view says (S11). Kinds, counts and, for the per-app rows, the app:
+/// nothing here names a path, a file or a folder. An app's name is shown in the menu and goes
+/// into a log only through the redacting `app:` label, as every app does.
 public enum HealthIssue: Sendable, Hashable, Identifiable {
   case accessibilityMissing
   case configInvalid(errors: Int)
@@ -91,6 +94,9 @@ public enum HealthIssue: Sendable, Hashable, Identifiable {
   case finderUnreadable(code: Int)
   case hotkeysUnheld(count: Int)
   case favoriteHotkeysShadowed(count: Int)
+  /// One app's problem. Each app is its own kind, so a second app that is not supported is news
+  /// and the same app again is not.
+  case app(AppHealth)
 
   /// The kind, whatever its count. A notice is raised when a kind appears, not when its count
   /// moves: a second warning in a file already warned about is the same state, not a new one.
@@ -106,6 +112,7 @@ public enum HealthIssue: Sendable, Hashable, Identifiable {
     case .finderUnreadable: "finder-unreadable"
     case .hotkeysUnheld: "hotkeys-unheld"
     case .favoriteHotkeysShadowed: "favorite-hotkeys-shadowed"
+    case .app(let health): "app-\(health.problem.rawValue):\(health.app.bundleIdentifier)"
     }
   }
 
@@ -118,6 +125,9 @@ public enum HealthIssue: Sendable, Hashable, Identifiable {
     case .configInvalid, .storeUnavailable, .finderAutomationDenied, .finderUnreadable: .degraded
     case .configWarnings, .compatibilityFellBack, .hotkeysUnheld, .favoriteHotkeysShadowed:
       .notice
+    // An app that stopped answering loses what worked a moment ago; one that was never
+    // supported or recognized is Jilpa standing back, as designed.
+    case .app(let health): health.problem == .notAnswering ? .degraded : .notice
     }
   }
 
@@ -127,7 +137,7 @@ public enum HealthIssue: Sendable, Hashable, Identifiable {
     case .finderAutomationDenied: .automationSettings
     case .configInvalid, .configWarnings, .favoriteHotkeysShadowed: .configFolder
     case .compatibilityUnavailable, .compatibilityFellBack, .storeUnavailable,
-      .finderUnreadable, .hotkeysUnheld:
+      .finderUnreadable, .hotkeysUnheld, .app:
       nil
     }
   }
@@ -160,6 +170,11 @@ public enum Health {
     if inputs.unheldHotkeys > 0 { issues.append(.hotkeysUnheld(count: inputs.unheldHotkeys)) }
     if inputs.shadowedFavoriteHotkeys > 0 {
       issues.append(.favoriteHotkeysShadowed(count: inputs.shadowedFavoriteHotkeys))
+    }
+    for health in inputs.apps {
+      // With no bundle at all every app is unlisted, and one row already says so.
+      if health.problem == .notSupported, inputs.compatibility == .unavailable { continue }
+      issues.append(.app(health))
     }
     // Stable: a sort that kept equal elements in any order could move a row under the pointer.
     return issues.enumerated()

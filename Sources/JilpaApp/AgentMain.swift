@@ -155,6 +155,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
       self?.showFinderWindows()
       self?.health?.refresh()
     }
+    agent.onAppHealthChange = { [weak self] in self?.health?.refresh() }
     statusItem.setControls(agent.menuControls())
     agent.start()
   }
@@ -185,6 +186,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
       inputs.finderFailure = agent.finderFailure
       inputs.unheldHotkeys = agent.unheldHotkeys
       inputs.shadowedFavoriteHotkeys = agent.shadowedFavoriteHotkeys
+      inputs.apps = agent.appProblems()
     }
     return inputs
   }
@@ -306,6 +308,10 @@ final class DialogAgent {
   var onControlsChange: (() -> Void)?
   /// A new reading of Finder's windows, or of whether Jilpa may read them.
   var onFinderWindowsChange: (() -> Void)?
+  /// Something the health view says about one app moved (S11).
+  var onAppHealthChange: (() -> Void)?
+  /// The apps whose dialogs lately got nothing, and why. Held here and in memory only.
+  private var appHealth = AppHealthLog()
 
   init(config: ConfigCenter, pins: PinCenter) {
     self.pins = pins
@@ -399,6 +405,20 @@ final class DialogAgent {
       try? self.pins.toggle(dialogFolder: self.presenter.dialogFolder)
     }
 
+    // Per-app support for the health view (S11): what the pipeline already decided about each
+    // dialog, kept as a short list. Nothing here probes an app.
+    presenter.onIgnored = { [weak self] app, reason in
+      guard let problem = Self.problem(reason) else { return }
+      self?.note(app, problem)
+    }
+    presenter.onHostNotAnswering = { [weak self] app in self?.note(app, .notAnswering) }
+    presenter.onRecognized = { [weak self] app in
+      guard let self, let id = app.app else { return }
+      let before = self.appHealth
+      self.appHealth.recognized(id)
+      if self.appHealth != before { self.onAppHealthChange?() }
+    }
+
     // Where a favorite is added and removed. Weak on the presenter: the centre outlives the
     // agent, and an agent that has stopped must not keep it alive.
     presenter.favoritesEditor = config
@@ -451,6 +471,36 @@ final class DialogAgent {
   }
 
   var hasStore: Bool { store != nil }
+
+  /// The per-app rows, with "not answering" kept only for apps that still run.
+  func appProblems() -> [AppHealth] {
+    let running = Set(
+      NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier.map { AppID($0) } })
+    appHealth.keep(running: running)
+    return appHealth.entries
+  }
+
+  /// What the health view makes of a dialog that got nothing. A pause, an exclusion and private
+  /// mode are the user's own choices and are said elsewhere, so they are not problems here.
+  private static func problem(_ reason: IgnoredReason) -> AppHealthProblem? {
+    switch reason {
+    case .unlisted, .unsupportedCell: .notSupported
+    case .structure: .notRecognized
+    case .hostNotAnswering: .notAnswering
+    case .excluded, .denied: nil
+    }
+  }
+
+  /// One app's problem, named as the running app names itself. An app with no bundle
+  /// identifier has no row: nothing could tell it from the next one.
+  private func note(_ app: AppProcess, _ problem: AppHealthProblem) {
+    guard let id = app.app else { return }
+    let name =
+      NSRunningApplication(processIdentifier: app.pid)?.localizedName ?? id.bundleIdentifier
+    let before = appHealth
+    appHealth.noted(AppHealth(app: id, name: name, problem: problem))
+    if appHealth != before { onAppHealthChange?() }
+  }
   var finderAutomation: FinderAutomation? { finders.automation }
   var finderFailure: Int? { finders.failure }
   var unheldHotkeys: Int { hotkeys.unheld.count }

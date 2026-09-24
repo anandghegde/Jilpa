@@ -145,6 +145,15 @@ public final class PanelPresenter: PanelActions {
   /// ranking is frozen, and a dialog's row goes in unscored, which is what a cold start is.
   public weak var suggestions: (any SuggestionSource)?
 
+  /// A file panel of this app got nothing, and why (S11, per-app support). Told for every one,
+  /// so the health view can say what the user just ran into; nothing here decides on it.
+  public var onIgnored: ((AppProcess, IgnoredReason) -> Void)?
+  /// A file panel of this app was recognized: supported, read and answering.
+  public var onRecognized: ((AppProcess) -> Void)?
+  /// A dialog of this app went stale because its host stopped answering and its breaker opened
+  /// while the dialog was open.
+  public var onHostNotAnswering: ((AppProcess) -> Void)?
+
   /// Whether a folder is a git root, asked only under a developer-context permit. A closure so
   /// the presenter can be exercised without a disk.
   public var gitRoot: @Sendable (URL, SensePermit) -> Bool = { TerminalReader.isGitRoot($0, permit: $1) }
@@ -333,6 +342,7 @@ public final class PanelPresenter: PanelActions {
     switch event {
     case .found(let id, let app, let window, let variant):
       if watched[id] == nil { watched[id] = Watched(openedAt: Date()) }
+      onRecognized?(app)
       // The anchors are still being found, so the strip attaches and its button waits: showing
       // it now is how the attach budget is met, and a dialog that turns out to be unnavigable
       // takes it away again.
@@ -346,6 +356,7 @@ public final class PanelPresenter: PanelActions {
 
     case .updated(let dialog):
       latch.observe(dialog)
+      if dialog.session.isStale { checkHost(dialog.app) }
       // Every announced dialog, not only the one under the strip: a folder the user reached by
       // themselves belongs in the history whether or not the panel was watching.
       await noteFolder(dialog)
@@ -373,8 +384,9 @@ public final class PanelPresenter: PanelActions {
       if tracker.hidesForMove { apply() }
       host.startTracking()
 
-    case .ignored(let id, _, _, _):
+    case .ignored(let id, let app, _, let reason):
       if let id, shown?.id == id { dismiss(id) }
+      onIgnored?(app, reason)
       // A dialog announced and then not taken up has no row to write.
       if let id { watched[id] = nil }
 
@@ -622,6 +634,19 @@ public final class PanelPresenter: PanelActions {
     // Only once a row is really stored. The menus read a cache, and a refresh that follows a
     // write nobody made would be a read the user's next dialog pays for and learns nothing by.
     recentsSource?.refresh(dialog.policy.context.state)
+  }
+
+  // MARK: - The host's health
+
+  /// A reading the host did not answer. Whether that is its breaker open is asked of its
+  /// session, off the pump; a stale reading for another reason — the panel not matching its
+  /// signature for a moment — says nothing about the host and reports nothing.
+  private func checkHost(_ app: AppProcess) {
+    let session = pool.session(for: app.pid)
+    Task { [weak self] in
+      guard await session.isDegraded else { return }
+      self?.onHostNotAnswering?(app)
+    }
   }
 
   // MARK: - The ranking

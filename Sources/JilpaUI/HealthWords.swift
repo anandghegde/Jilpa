@@ -2,8 +2,8 @@ import Foundation
 import JilpaCore
 
 /// What the health view says about each problem and each fix (S11): what is off, and what to do
-/// about it, in words a user can act on. Kinds and counts only; no row names a file, a folder or
-/// an app, so a row is never something the user has to hide.
+/// about it, in words a user can act on. No row names a file or a folder; the per-app rows name
+/// the app, which is what the user needs to recognise the dialog they just saw.
 enum HealthWords {
   static func title(_ issue: HealthIssue) -> String {
     switch issue {
@@ -17,6 +17,12 @@ enum HealthWords {
     case .finderUnreadable: String(localized: "Finder Did Not Answer")
     case .hotkeysUnheld: String(localized: "Some Shortcuts Have No Key")
     case .favoriteHotkeysShadowed: String(localized: "Some Favorite Shortcuts Are Taken")
+    case .app(let health):
+      switch health.problem {
+      case .notSupported: String(localized: "\(health.name) Is Not Supported Yet")
+      case .notAnswering: String(localized: "\(health.name) Is Not Answering")
+      case .notRecognized: String(localized: "\(health.name)'s Dialog Was Not Recognized")
+      }
     }
   }
 
@@ -43,6 +49,15 @@ enum HealthWords {
       String(localized: "\(count) shortcuts use a key this keyboard does not have")
     case .favoriteHotkeysShadowed(let count):
       String(localized: "\(count) favorites use a shortcut already in use")
+    case .app(let health):
+      switch health.problem {
+      case .notSupported:
+        String(localized: "Its dialogs are left as they are; nothing is drawn or sent")
+      case .notAnswering:
+        String(localized: "Jilpa stopped helping in it. Quitting and reopening it starts again")
+      case .notRecognized:
+        String(localized: "The dialog did not look as expected, so Jilpa left it alone")
+      }
     }
   }
 
