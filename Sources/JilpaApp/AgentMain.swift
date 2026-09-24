@@ -246,8 +246,7 @@ final class DialogAgent {
       navigator: Navigator(
         source: pool, reader: DialogReader(source: pool),
         userActive: { latch.isActive($0) }),
-      latch: latch, pool: pool, host: host, destination: Self.walkingSkeletonDestination,
-      recorder: store.map { NavigationRecorder.live($0) },
+      latch: latch, pool: pool, host: host, recorder: store.map { NavigationRecorder.live($0) },
       uses: uses, sessions: store.map { SessionRecorder.live($0) })
 
     // The recents come from the same counters the ranker reads: one record of what was used,
@@ -255,8 +254,9 @@ final class DialogAgent {
     // counter a dialog steps and the pin a menu sets go through one gate.
     recents = store.flatMap { store in uses.map { RecentsCenter.live(store, uses: $0) } }
     presenter.recentsSource = recents
-    // The ranker reads the same cache (N1): a dialog is ranked on its first reading and that
-    // answer is its shadow ranking, written with its session row when it ends.
+    // The ranker reads the same cache (N1): a dialog is ranked on its first reading, that answer
+    // is its shadow ranking, written with its session row when it ends, and it is the strip's
+    // chips.
     presenter.suggestions = recents
     // What resolution a dialog gets, and whether Jilpa goes there by itself (D8). Held here
     // rather than by the presenter for the same reason the recents are: the configuration is
@@ -276,15 +276,21 @@ final class DialogAgent {
     // The presenter is what knows whether a supported dialog has the focus of the frontmost app,
     // which is the whole of contract 2's condition for a dialog chord.
     presenter.hotkeys = hotkeys
-    // The three history controls, fuzzy jump and the Finder window cycle, which are the actions
-    // WP5 and WP7 ship an answer for. Everything else in the table is answered by nothing yet and so registered for
-    // nothing: a chord held for an action that does nothing is a key taken from every other app
-    // for nothing.
+    // The three history controls, fuzzy jump, the Finder window cycle and the three picks,
+    // which are the dialog actions with an answer. Anything in the table answered by nothing is
+    // registered for nothing: a chord held for an action that does nothing is a key taken from
+    // every other app for nothing.
     let presenter = self.presenter
     for (action, move): (HotkeyAction, HistoryMove) in [
       (.back, .back), (.forward, .forward), (.returnToOriginal, .returnToOriginal),
     ] {
       hotkeys.answer(action) { [weak presenter] in presenter?.moveInHistory(move) }
+    }
+    // The chip with that number, as the strip draws it now (N1). A dialog chord like the others.
+    for (action, pick): (HotkeyAction, Int) in [
+      (.pickFirst, 1), (.pickSecond, 2), (.pickThird, 3),
+    ] {
+      hotkeys.answer(action) { [weak presenter] in presenter?.pickSuggestion(pick) }
     }
     // The one chord that takes key status, and the only focus change Jilpa initiates (D11).
     hotkeys.answer(.fuzzyJump) { [weak presenter] in presenter?.openJump() }
@@ -425,14 +431,6 @@ final class DialogAgent {
       ?? FileManager.default.temporaryDirectory
     return try? ActivityStore(at: ActivityStore.defaultURL(applicationSupport: base))
   }
-
-  /// The folder the strip's button offers a dialog that nothing named one for (WP2). Favorites,
-  /// recents and the defaults reach the same button as a request of their own; what is left for
-  /// this is a dialog with no default, no rule and no prediction, which WP7's ranked set will
-  /// answer with the folders the app actually uses.
-  static let walkingSkeletonDestination =
-    FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-    ?? FileManager.default.homeDirectoryForCurrentUser
 
   func start() {
     let watcher = self.watcher

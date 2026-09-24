@@ -25,13 +25,13 @@ public struct HistoryState: Sendable, Equatable {
   }
 }
 
-/// What the strip shows. The suggestions zone still carries the one destination the walking
-/// skeleton's button goes to; the ranked set, the context and the overflow arrive with the work
-/// packages that own their content.
+/// What the strip shows. The overflow arrives with the work package that owns its content.
 public struct PanelContents: Sendable, Equatable {
-  /// The destination's display name, on the chip.
-  public var destination: String
-  /// False while the dialog cannot be navigated. The chip stays where it is and the notice
+  /// The chips, in pick order (N1): what resolution named for the dialog first, then the ranked
+  /// set. Chosen by `SuggestionChips`; the strip draws what it is handed. Empty on a cold start,
+  /// and then the zone asks for no room at all.
+  public var suggestions: [SuggestionChip]
+  /// False while the dialog cannot be navigated. The chips stay where they are and the notice
   /// says why.
   public var isEnabled: Bool
   /// The one line in force, already resolved by `NoticeLine`. The strip draws it and does not
@@ -68,13 +68,13 @@ public struct PanelContents: Sendable, Equatable {
   public var project: ProjectOffer?
 
   public init(
-    destination: String, isEnabled: Bool, notice: Notice? = nil,
+    suggestions: [SuggestionChip] = [], isEnabled: Bool, notice: Notice? = nil,
     history: HistoryState = HistoryState(), favorites: [FavoritePlace] = [],
     folder: String? = nil, favoriteHere: FavoriteID? = nil, recents: [RecentPlace] = [],
     finderWindows: [FinderWindowPlace] = [], pin: PinOffer = PinOffer(),
     project: ProjectOffer? = nil
   ) {
-    self.destination = destination
+    self.suggestions = suggestions
     self.isEnabled = isEnabled
     self.notice = notice
     self.history = history
@@ -92,7 +92,9 @@ public struct PanelContents: Sendable, Equatable {
 /// dialogs and navigates nothing itself.
 @MainActor
 public protocol PanelActions: AnyObject {
-  func panelChoseDestination()
+  /// A chip pressed, or chosen from the menu the collapsed zone opens (N1), by its pick number.
+  /// It is a folder change like any other and goes through the Navigator.
+  func panelChoseSuggestion(_ pick: Int)
   func panelChoseHistory(_ move: HistoryMove)
   /// Return in the fuzzy jump, with whatever was highlighted. Nothing has been sent to the
   /// dialog: the app gives key status back, checks that the dialog came back as it was left and
@@ -191,8 +193,11 @@ public final class PanelHost {
   let historyZone: NSStackView
   let historyButtons: [HistoryMove: StripButton]
   let suggestionZone: NSStackView
-  /// The chip, which carries the destination's name.
-  let button: StripButton
+  /// One chip per pick number, made once. A chip past the number of suggestions is hidden.
+  let chips: [StripButton]
+  /// "+2" beside the first chip, when the zone has room for one chip and not for all of them.
+  /// It opens the same menu the icon does, so every chip is still one press away.
+  let moreButton: StripButton
   /// What the suggestions zone shrinks to when the strip is too short for a name.
   let suggestionIcon: StripButton
   let noticeZone: NSStackView
@@ -257,16 +262,19 @@ public final class PanelHost {
     window = StripPanel()
     ticker = FrameTicker(window: window)
 
-    button = StripButton()
-    button.bezelStyle = .rounded
-    button.setButtonType(.momentaryPushIn)
-    // The chip gives up its width before the notice does: a name truncates to something still
-    // recognisable, and half a sentence does not.
-    button.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
-
+    var made: [StripButton] = []
+    for _ in 0..<SuggestionChips.limit { made.append(Self.chipButton()) }
+    let chips = made
+    self.chips = chips
+    moreButton = StripButton()
+    moreButton.bezelStyle = .accessoryBar
+    moreButton.setButtonType(.momentaryPushIn)
+    moreButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+    moreButton.setContentHuggingPriority(.required, for: .horizontal)
     suggestionIcon = Self.iconButton(symbol: "folder")
-    suggestionZone = NSStackView(views: [button, suggestionIcon])
+    suggestionZone = NSStackView(views: chips + [moreButton, suggestionIcon])
     suggestionZone.spacing = Self.controlSpacing
+    suggestionZone.setAccessibilityLabel(String(localized: "Suggestions"))
 
     var buttons: [HistoryMove: StripButton] = [:]
     for move in [HistoryMove.back, .forward, .returnToOriginal] {
@@ -383,10 +391,15 @@ public final class PanelHost {
       control.action = Self.selector(for: move)
       control.isEnabled = false
     }
-    button.target = self
-    button.action = #selector(destinationPressed)
-    suggestionIcon.target = self
-    suggestionIcon.action = #selector(destinationPressed)
+    for (index, chip) in chips.enumerated() {
+      chip.target = self
+      chip.action = #selector(chipPressed(_:))
+      chip.tag = index + 1
+    }
+    for control in [moreButton, suggestionIcon] {
+      control.target = self
+      control.action = #selector(suggestionsPressed(_:))
+    }
     for control in [favoritesButton, favoritesIcon] {
       control.target = self
       control.action = #selector(favoritesPressed)
@@ -517,13 +530,7 @@ public final class PanelHost {
     guard next != contents else { return }
     contents = next
 
-    button.title = next.destination
-    button.isEnabled = next.isEnabled
-    suggestionIcon.isEnabled = next.isEnabled
-    let goTo = String(localized: "Go to \(next.destination)")
-    button.setAccessibilityLabel(goTo)
-    suggestionIcon.setAccessibilityLabel(goTo)
-    suggestionIcon.toolTip = goTo
+    drawSuggestions(next)
 
     for (move, control) in historyButtons { control.isEnabled = next.history[move] }
 
@@ -638,12 +645,21 @@ public final class PanelHost {
         zone: .history, full: Self.controlLength + 2 * step,
         compact: Self.controlLength + step))
 
-    if horizontal {
-      let chip = max(button.fittingSize.width, Self.controlLength)
-      demands.append(ZoneDemand(zone: .suggestions, full: chip, icon: Self.controlLength))
-    } else {
+    // The suggestions zone is there when it has a chip. A cold start hands in no demand: the
+    // strip does not make room for a folder nobody has any reason to offer (N1).
+    let offered = min(contents?.suggestions.count ?? 0, chips.count)
+    if offered > 0, horizontal {
+      let width = { (control: StripButton) in max(control.fittingSize.width, Self.controlLength) }
+      let full =
+        chips.prefix(offered).reduce(CGFloat.zero) { $0 + width($1) }
+        + CGFloat(offered - 1) * Self.controlSpacing
+      // Compact is the wireframe's one chip plus a count, and only a zone of more than one chip
+      // has a count to show.
+      let compact = offered > 1 ? width(chips[0]) + Self.controlSpacing + width(moreButton) : nil
       demands.append(
-        ZoneDemand(zone: .suggestions, lengths: [.icon: Self.controlLength]))
+        ZoneDemand(zone: .suggestions, full: full, compact: compact, icon: Self.controlLength))
+    } else if offered > 0 {
+      demands.append(ZoneDemand(zone: .suggestions, lengths: [.icon: Self.controlLength]))
     }
 
     // The menus zone is there when it has something to offer. With nothing to go to and
@@ -715,8 +731,13 @@ public final class PanelHost {
     historyButtons[.returnToOriginal]?.isHidden = history < .full
 
     let suggestions = details[.suggestions] ?? .hidden
+    let offered = contents?.suggestions.count ?? 0
     suggestionZone.isHidden = suggestions == .hidden
-    button.isHidden = suggestions != .full
+    for (index, chip) in chips.enumerated() {
+      let drawn = suggestions == .full || (suggestions == .compact && index == 0)
+      chip.isHidden = !(index < offered && drawn)
+    }
+    moreButton.isHidden = suggestions != .compact
     suggestionIcon.isHidden = suggestions != .icon
 
     let notice = details[.notice] ?? .hidden
@@ -830,7 +851,7 @@ public final class PanelHost {
 
   // MARK: - Presses
 
-  @objc private func destinationPressed() { actions?.panelChoseDestination() }
+  @objc private func chipPressed(_ sender: NSButton) { actions?.panelChoseSuggestion(sender.tag) }
   @objc private func backPressed() { actions?.panelChoseHistory(.back) }
   @objc private func forwardPressed() { actions?.panelChoseHistory(.forward) }
   @objc private func returnPressed() { actions?.panelChoseHistory(.returnToOriginal) }
@@ -841,6 +862,72 @@ public final class PanelHost {
     case .forward: #selector(forwardPressed)
     case .returnToOriginal: #selector(returnPressed)
     }
+  }
+
+  // MARK: - The suggestions
+
+  /// Each chip's number and name, and its reason where a pointer and VoiceOver find it. The
+  /// count and the icon carry every chip's name, so a zone drawn small loses nothing to the
+  /// keyboard or to VoiceOver.
+  private func drawSuggestions(_ next: PanelContents) {
+    let offered = next.suggestions
+    for (index, chip) in chips.enumerated() {
+      chip.isEnabled = next.isEnabled
+      guard index < offered.count else {
+        chip.title = ""
+        chip.toolTip = nil
+        chip.setAccessibilityLabel(nil)
+        continue
+      }
+      let suggestion = offered[index]
+      chip.title = "\(suggestion.pick)  \(suggestion.name)"
+      chip.toolTip = SuggestionWords.tooltip(suggestion)
+      chip.setAccessibilityLabel(SuggestionWords.label(suggestion))
+    }
+    let rest = max(offered.count - 1, 0)
+    moreButton.title = "+\(rest)"
+    moreButton.isEnabled = next.isEnabled
+    let more = String(localized: "\(rest) more suggestions")
+    moreButton.setAccessibilityLabel(more)
+    moreButton.toolTip = more
+    suggestionIcon.isEnabled = next.isEnabled
+    let names = offered.map { "\($0.pick) \($0.name)" }.joined(separator: ", ")
+    let all = String(localized: "Suggestions: \(names)")
+    suggestionIcon.setAccessibilityLabel(all)
+    suggestionIcon.toolTip = all
+  }
+
+  /// Pops the suggestions menu under the count or the icon: every chip, including the ones the
+  /// strip had no room to draw. Built and thrown away like the other menus.
+  @objc private func suggestionsPressed(_ sender: NSView) {
+    guard let menu = suggestionsMenu() else { return }
+    let corner = side == .above ? NSPoint(x: 0, y: 0) : NSPoint(x: 0, y: sender.bounds.height)
+    menu.popUp(positioning: nil, at: corner, in: sender)
+  }
+
+  /// The suggestions menu as it stands right now: each chip by its name, with its number's
+  /// symbol and its reason underneath. Nil when there are none. The items are dimmed while the
+  /// dialog cannot be navigated, like the chips.
+  func suggestionsMenu() -> NSMenu? {
+    guard let contents, !contents.suggestions.isEmpty else { return nil }
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    for suggestion in contents.suggestions {
+      let item = NSMenuItem(
+        title: suggestion.name, action: #selector(suggestionPressed(_:)), keyEquivalent: "")
+      item.target = self
+      item.tag = suggestion.pick
+      item.isEnabled = contents.isEnabled
+      item.image = NSImage(
+        systemSymbolName: "\(suggestion.pick).circle", accessibilityDescription: nil)
+      item.subtitle = SuggestionWords.reason(suggestion)
+      menu.addItem(item)
+    }
+    return menu
+  }
+
+  @objc private func suggestionPressed(_ sender: NSMenuItem) {
+    actions?.panelChoseSuggestion(sender.tag)
   }
 
   // MARK: - The favorites menu
@@ -1015,6 +1102,17 @@ public final class PanelHost {
   }
 
   // MARK: - Pieces
+
+  /// A chip: a folder's number and name. It gives up its width before the notice does: a name
+  /// truncates to something still recognisable, and half a sentence does not.
+  private static func chipButton() -> StripButton {
+    let control = StripButton()
+    control.bezelStyle = .rounded
+    control.setButtonType(.momentaryPushIn)
+    control.lineBreakMode = .byTruncatingTail
+    control.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
+    return control
+  }
 
   private static func iconButton(symbol: String) -> StripButton {
     let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)

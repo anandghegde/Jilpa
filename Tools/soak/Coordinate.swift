@@ -45,7 +45,7 @@ import JilpaUI
 ///   5. cancelling gives closed and then ended, in that order, with an unknown outcome, since
 ///      nothing gathers evidence yet;
 ///   6. quitting the app with its dialog open also ends the dialog, as unknown;
-///   7. with `--driver panel`, the whole app path does the same: pressing the strip's button
+///   7. with `--driver panel`, the whole app path does the same: pressing the strip's first chip
 ///      arrives, the proposed filename is byte-identical after every move, and with
 ///      `--interrupt n` a keystroke in the middle of move n aborts it with the folder
 ///      unchanged and the host's confirmation never sent. What the moves after it may do
@@ -70,7 +70,7 @@ enum Coordinate {
     /// option matrix of `jilpa-soak run` is measured with, `product` is `JilpaNavigator` itself,
     /// driven from the coordinator's own descriptor, and `panel` is the whole app path — the
     /// same `PanelHost`, `PanelPresenter` and `ActivityLatchMirror` the composition root builds,
-    /// with the move started by pressing the strip's button. With `panel` the tool announces
+    /// with the move started by pressing the strip's first chip. With `panel` the tool announces
     /// nothing itself: the presenter is the thing under test and it announces its own moves.
     var driver = "soak"
     /// The move, if any, that gets a keystroke in the middle of it. The tool sets the dialog's
@@ -671,13 +671,13 @@ enum Coordinate {
         fixture.send("directory \(target.path)")
 
       case "keys" where options.driver == "panel":
-        // The whole app path: the strip's button, the presenter that announces its own move to
-        // the coordinator, the mirror the Navigator asks, and the Navigator. The app never waits
-        // for a move — the press returns to the run loop — but the tool has to.
+        // The whole app path: the strip's first chip, the presenter that announces its own move
+        // to the coordinator, the mirror the Navigator asks, and the Navigator. The app never
+        // waits for a move — the press returns to the run loop — but the tool has to.
         if let presenter {
           let running = await MainActor.run { () -> Task<Void, Never>? in
             presenter.setDestination(target)
-            presenter.panelChoseDestination()
+            presenter.panelChoseSuggestion(1)
             return presenter.pending
           }
           await running?.value

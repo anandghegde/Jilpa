@@ -65,8 +65,10 @@ import JilpaUI
 /// written with the dialog's session row when the dialog ends, scored against the folder it was
 /// confirmed in. What is written is decided in `EndedDialog`, and whether it may be, by the gate.
 ///
-/// What comes next: the ranked set on the strip. Here a dialog with no default of its own still
-/// offers one folder, the same one for every dialog.
+/// The same answer is the strip's chips: what resolution named first, then the ranked set less
+/// the folder the dialog is in, three at most, each with its pick number (`SuggestionChips`). A
+/// press and a pick hotkey are the same request to the Navigator as any other. A dialog nothing
+/// was named or ranked for has no chips: a cold start shows fewer suggestions, never made-up ones.
 @MainActor
 public final class PanelPresenter: PanelActions {
   private let coordinator: DialogCoordinator
@@ -96,7 +98,9 @@ public final class PanelPresenter: PanelActions {
   /// Where an ended dialog's session row and its frozen ranking go (N1, contract 6). Nil when
   /// nothing records, like the two above.
   private let sessions: SessionRecorder?
-  private var destination: URL
+  /// A folder a caller put on the strip as its first chip, for a dialog nothing named one for.
+  /// The soak's move target; the app puts none, so its chips are only what was named or ranked.
+  private var destination: URL?
 
   /// The favorites, in the configuration's order (D4). Given by the app, never read from a
   /// file here: the presenter draws what it is told and owns no configuration of its own.
@@ -176,6 +180,13 @@ public final class PanelPresenter: PanelActions {
     /// What changed the dialog's folder by itself, if anything did. Such a dialog is recorded
     /// and never scored: a folder Jilpa chose says nothing about the ranker.
     var automated: AutoTriggerKind?
+    /// The ranked set the chips are drawn from. The frozen ranking at first, and asked again —
+    /// for the chips alone — when the gate's answers for the dialog move: private mode coming on
+    /// takes the history out of the chips at once, and going off brings it back.
+    var offered: [Suggestion] = []
+    /// The policy the last ranking was asked under. A ranking that lands after a newer one was
+    /// asked for is not drawn.
+    var rankedUnder: SessionPolicy?
   }
 
   /// The dialog the strip is on, if any. One strip, so one dialog: the frontmost app owns it.
@@ -222,11 +233,10 @@ public final class PanelPresenter: PanelActions {
     /// What the button last said about itself, so the strip can be redrawn without asking the
     /// coordinator again.
     var isEnabled = false
-    /// The folder resolution named for this dialog, if it named one (D8). It is the button's
-    /// destination while it is set, so a default that the gate would not let navigate by itself
-    /// is still one press away. Nil is not "nowhere": it is this dialog having no destination of
-    /// its own, and the button then offers the one the presenter was built with.
-    var suggestion: URL?
+    /// The folder resolution named for this dialog, if it named one (D8). It is the first chip
+    /// while it is set, so a default that the gate would not let navigate by itself is still one
+    /// press away, and one that cannot be reached is still offered for when it can.
+    var named: NamedDestination?
     /// Everything in force about this dialog. The strip shows the top of it; the rest is still
     /// true underneath and comes back when the top is cleared.
     var line = NoticeLine()
@@ -248,7 +258,8 @@ public final class PanelPresenter: PanelActions {
 
   public init(
     coordinator: DialogCoordinator, navigator: any Navigating, latch: ActivityLatchMirror,
-    pool: AXSessionPool, host: PanelHost, destination: URL, places: LocationEdge = .live,
+    pool: AXSessionPool, host: PanelHost, destination: URL? = nil,
+    places: LocationEdge = .live,
     recorder: NavigationRecorder? = nil, uses: UseRecorder? = nil,
     sessions: SessionRecorder? = nil, tracking: PanelTracking = .live,
     preferred: DockSide = .below, clock: PollClock = .continuous,
@@ -412,24 +423,44 @@ public final class PanelPresenter: PanelActions {
     tracker = PanelTracker(style: tracking)
   }
 
-  // MARK: - The button
+  // MARK: - The chips
 
-  public func panelChoseDestination() {
+  /// A chip pressed, or chosen from the menu the collapsed zone opens (N1).
+  public func panelChoseSuggestion(_ pick: Int) { pickSuggestion(pick) }
+
+  /// The chip with this number, pressed or picked by its hotkey (N1). `HotkeyCenter` answers the
+  /// three pick chords with this.
+  ///
+  /// The chips are chosen again at the press, from what the strip is drawing now, so the number
+  /// is the one on screen. A number with no chip does nothing: the strip showed none there, and
+  /// a pick hotkey is not a reason to go anywhere else. The answer is whether a move was asked
+  /// for; whether it arrives is the Navigator's, with its reason on the strip.
+  @discardableResult
+  public func pickSuggestion(_ pick: Int) -> Bool {
     // Cleared first, so that a press with no dialog under the strip is not mistaken for the
     // press before it still running.
     pending = nil
-    guard let shown else { return }
-    let (folder, source) = buttonTarget(shown)
+    guard let shown, let chip = chips(for: shown).first(where: { $0.pick == pick }) else {
+      return false
+    }
+    let folder = URL(fileURLWithPath: chip.path, isDirectory: true)
+    // A chip a rule or a default named is the button it used to be; a ranked one is the
+    // ranker's answer being used, which the correction rate is asked about separately.
+    let source: ManualSource = chip.isRanked ? .suggestion : .panelButton
     pending = Task { await self.move(shown, to: folder, trigger: .manual(source)) }
+    return true
   }
 
-  /// Where the button goes: what resolution named; else, with nothing pinned, the sensed
-  /// project's root (N5); else the folder the presenter was built with. The project never
-  /// displaces a destination a rule, a default or a pin named (contracts 4 and 5).
-  private func buttonTarget(_ shown: Shown) -> (URL, ManualSource) {
-    if let suggestion = shown.suggestion { return (suggestion, .panelButton) }
-    if let root = sensedRoot(shown) { return (root, .project) }
-    return (destination, .panelButton)
+  /// The chips this dialog's strip draws: what resolution named, or the caller's folder when
+  /// nothing was, then the ranked set less the folder the dialog is in (`SuggestionChips`).
+  private func chips(for shown: Shown) -> [SuggestionChip] {
+    let named =
+      shown.named
+      ?? destination.map {
+        NamedDestination(location: LocationRef(path: $0.path, lineage: []), trigger: nil)
+      }
+    return SuggestionChips.choose(
+      named: named, ranked: watched[shown.id]?.offered ?? [], here: trails[shown.id]?.place)
   }
 
   /// Back, Forward or Return to original folder, pressed on the strip.
@@ -612,21 +643,31 @@ public final class PanelPresenter: PanelActions {
       entry.frozen = nil
     }
     let first = !entry.asked && dialog.session.snapshot != nil
-    if first { entry.asked = true }
+    // The chips are the ranker's answer under the gate's answers in force, so a policy that
+    // moved asks again, for the chips alone. The frozen ranking is never asked for twice.
+    let again = entry.asked && entry.rankedUnder != nil && entry.rankedUnder != dialog.policy
+    if first || again {
+      entry.asked = true
+      entry.rankedUnder = dialog.policy
+    }
     watched[dialog.id] = entry
-    guard first, suggestions != nil, let app = dialog.app.app else { return }
-    Task { [weak self] in await self?.freeze(dialog, app: app) }
+    guard first || again, suggestions != nil, let app = dialog.app.app else { return }
+    Task { [weak self] in await self?.rank(dialog, app: app, freezing: first) }
   }
 
-  /// Ranks the dialog and keeps the answer as its shadow ranking, unless it has ended meanwhile
-  /// or a reading has said the ranking may not be kept.
-  private func freeze(_ dialog: ObservedDialog, app: AppID) async {
+  /// Ranks the dialog. The first answer is also its shadow ranking, unless the dialog has ended
+  /// meanwhile or a reading has said the ranking may not be kept; any answer is what the chips
+  /// are drawn from, unless a newer one has been asked for since.
+  private func rank(_ dialog: ObservedDialog, app: AppID, freezing: Bool) async {
     guard let suggestions else { return }
     let query = await rankingQuery(for: dialog, app: app)
     let ranked = await suggestions.suggestions(query, limit: ShadowRanking.depth)
-    guard var entry = watched[dialog.id], !entry.withheld else { return }
-    entry.frozen = ranked
+    guard var entry = watched[dialog.id] else { return }
+    if freezing, !entry.withheld { entry.frozen = ranked }
+    if entry.rankedUnder == dialog.policy { entry.offered = ranked }
     watched[dialog.id] = entry
+    // Late chips join a strip already drawn; nothing about the dialog waited for them.
+    if shown?.id == dialog.id { apply() }
   }
 
   /// What the ranker is told about one dialog. Every part but the app may be missing, and a
@@ -765,13 +806,6 @@ public final class PanelPresenter: PanelActions {
   private func projectOffer(for shown: Shown) -> ProjectOffer? {
     guard let projects, let policy = shown.policy else { return nil }
     return projects.offer(policy: policy)
-  }
-
-  /// The sensed project's root, only while nothing is pinned: a pin beats sensed context.
-  private func sensedRoot(_ shown: Shown) -> URL? {
-    if pins?.offer(folders: []).current != nil { return nil }
-    guard let root = projectOffer(for: shown)?.folders.first else { return nil }
-    return URL(fileURLWithPath: root.path, isDirectory: true)
   }
 
   /// The sensed project changed. The strip redraws from it; nothing is sent.
@@ -931,12 +965,25 @@ public final class PanelPresenter: PanelActions {
 
     guard let resolution = await resolutions.resolution(for: dialog), shown?.id == dialog.id
     else { return }
+    // The folder a rule or a default named is the first chip, read for its identity first so the
+    // ranked chips are told apart from it by place. One that is not there has its path alone.
+    var named: NamedDestination?
+    switch resolution.outcome {
+    case .navigate(let destination), .suggestOnly(let destination, _),
+      .refuse(let destination, _):
+      let folder = URL(fileURLWithPath: destination.path, isDirectory: true)
+      let place = await locate(folder) ?? LocationRef(path: folder.path, lineage: [])
+      named = NamedDestination(location: place, trigger: destination.trigger)
+      guard shown?.id == dialog.id else { return }
+    case .keepNative, .yieldToUser:
+      break
+    }
     switch resolution.outcome {
     case .navigate(let destination):
       let folder = URL(fileURLWithPath: destination.path, isDirectory: true)
-      // Drawn on the button before the move starts, so the strip names where the dialog is going
-      // while it goes, and keeps naming it if the move does not arrive.
-      shown?.suggestion = folder
+      // Drawn as the first chip before the move starts, so the strip names where the dialog is
+      // going while it goes, and keeps naming it if the move does not arrive.
+      shown?.named = named
       apply()
       let reason = ResolutionNotices.reason(for: destination.trigger, going: folder.lastPathComponent)
       pending = Task { [weak self] in
@@ -944,37 +991,36 @@ public final class PanelPresenter: PanelActions {
           target, to: folder, trigger: .automation(destination.trigger), explaining: reason)
       }
     // The gate said no to navigating by itself, or nothing passed the confidence gate. The
-    // folder is still what this dialog is for, so the button offers it and says nothing: a
+    // folder is still what this dialog is for, so the first chip offers it and says nothing: a
     // suggestion the user has to press is not an automation to be explained.
-    case .suggestOnly(let destination, _):
-      shown?.suggestion = URL(fileURLWithPath: destination.path, isDirectory: true)
+    case .suggestOnly:
+      shown?.named = named
       apply()
     // Contract 5: the named destination is not reachable and nothing else takes its place. The
-    // button keeps offering it, because the user may mount the disk and press it.
+    // chip keeps offering it, because the user may mount the disk and press it.
     case .refuse(let destination, let reason):
       let folder = URL(fileURLWithPath: destination.path, isDirectory: true)
-      shown?.suggestion = folder
+      shown?.named = named
       shown?.line.show(ResolutionNotices.notice(for: reason, going: folder.lastPathComponent))
       apply()
     // Nothing named a folder for this dialog, or the user got there first. Either way the dialog
-    // keeps its own folder and the strip keeps offering the one it was built with.
+    // keeps its own folder and the strip offers the ranked set.
     case .keepNative, .yieldToUser:
       break
     }
   }
 
-  /// Points the strip's one button at another folder, for a dialog that resolution named none
-  /// for. WP7 replaces this outright: the panel will show the ranked set and the press will carry
-  /// which of them was pressed. The notice goes with the old destination, because it was about a
-  /// move to somewhere else.
+  /// Puts a folder on the strip as its first chip. The soak drives the whole app path with it —
+  /// this, then `panelChoseSuggestion(1)` — and the app never calls it. The notice goes with the
+  /// old first chip, because it was about a move to somewhere else.
   ///
-  /// It drops this dialog's resolved suggestion as well. The caller has named a folder, and a
-  /// button that then went somewhere else would be the one place in the app where what is drawn
-  /// on it is not where it goes.
+  /// It drops this dialog's resolved destination as well. The caller has named a folder, and a
+  /// first chip that then went somewhere else would be the one place in the app where what is
+  /// drawn on it is not where it goes.
   public func setDestination(_ url: URL) {
     destination = url
     guard shown != nil else { return }
-    shown?.suggestion = nil
+    shown?.named = nil
     shown?.line.clear(.unavailable)
     apply()
   }
@@ -1103,7 +1149,7 @@ public final class PanelPresenter: PanelActions {
       pinnable.append(root)
     }
     return PanelContents(
-      destination: buttonTarget(shown).0.lastPathComponent, isEnabled: shown.isEnabled,
+      suggestions: chips(for: shown), isEnabled: shown.isEnabled,
       notice: shown.line.current,
       history: HistoryState(
         back: canMove(.back), forward: canMove(.forward),
@@ -1133,7 +1179,8 @@ public final class PanelPresenter: PanelActions {
   /// somewhere in the listing themselves.
   private func noteSession(_ session: DialogSession) {
     if case .navigating = session.phase {
-      shown?.line.show(.working, going(to: moving ?? shown.map { buttonTarget($0).0 } ?? destination))
+      shown?.line.show(
+        .working, moving.map { going(to: $0) } ?? String(localized: "Changing folder…"))
     } else {
       shown?.line.clear(.working)
     }
@@ -1533,17 +1580,14 @@ public final class PanelPresenter: PanelActions {
     return .read(text: text, selection: values[.selectedTextRange]?.rangeValue)
   }
 
-  /// What the field offers.
-  ///
-  /// WP6 replaces this with the ranked set — favorites, recents, open windows and the
-  /// suggestions. Here it is the one destination the strip's button goes to and wherever this
-  /// dialog has already been, newest first, which is enough for the field to be worth opening.
+  /// What the field offers (D11): the chips, the sensed project, the favorites, Finder's
+  /// windows, the recents and wherever this dialog has already been, newest first.
   private func jumpList(for target: Shown) -> JumpList {
-    var rows = [
-      JumpRow(
-        path: destination.path, title: destination.lastPathComponent,
-        detail: destination.deletingLastPathComponent().path, source: .suggestion)
-    ]
+    // The chips first, in their order: what resolution named and what the ranker offers are the
+    // field's suggestions too, and the matcher keeps the caller's order between equals.
+    var rows = chips(for: target).map { chip in
+      JumpRow(path: chip.path, title: chip.name, detail: chip.detail, source: .suggestion)
+    }
     // The sensed project's folders, root first: the folders of what the user is working on.
     // Only while nothing is pinned, like the strip.
     if pins?.offer(folders: []).current == nil {

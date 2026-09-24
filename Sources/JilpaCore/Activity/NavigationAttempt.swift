@@ -12,10 +12,14 @@ public enum ManualSource: String, Sendable, Hashable, CaseIterable, LogSafe {
   /// A folder an open Finder window shows, from a menu or the cycle hotkey (D7). Its own
   /// source, because the user put that window there and neither named it nor confirmed in it.
   case finderWindow = "finder-window"
-  /// A folder of the sensed project, from the strip's context zone or the panel button while
-  /// the project is its destination (N5). Its own source, because Jilpa sensed it rather than
-  /// the user naming or confirming it.
+  /// A folder of the sensed project, from the strip's context zone (N5). Its own source,
+  /// because Jilpa sensed it rather than the user naming or confirming it.
   case project
+  /// A chip of the ranked set, pressed on the strip or picked by its hotkey (N1). Its own
+  /// source, because what the user does with the ranker's answer is the other half of how
+  /// useful it is, beside the shadow score. A chip that a rule or a default named is
+  /// `panelButton`, as it was before there were chips.
+  case suggestion
   case quickSearch = "quick-search"
   case hotkey
   case pathEntry = "path-entry"

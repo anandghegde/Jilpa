@@ -47,7 +47,7 @@ struct PanelHostTests {
     let host = PanelHost()
     let frame = CGRect(x: 120, y: 80, width: 400, height: PanelHost.thickness)
     host.show(
-      PanelContents(destination: "Invoices", isEnabled: true),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true),
       at: PanelPlacement(frame: frame, side: .below, screen: 0, isInsideParent: false))
     #expect(host.isVisible)
     #expect(host.window.frame == frame)
@@ -55,38 +55,38 @@ struct PanelHostTests {
     #expect(!host.isVisible)
   }
 
-  @Test func theButtonCarriesTheDestinationAndAVoiceOverLabel() {
+  @Test func theChipCarriesItsNumberItsNameAndAVoiceOverLabel() {
     let host = PanelHost()
-    host.update(PanelContents(destination: "Invoices", isEnabled: true))
-    #expect(host.button.title == "Invoices")
-    #expect(host.button.isEnabled)
-    #expect(host.button.accessibilityLabel()?.contains("Invoices") == true)
+    host.update(PanelContents(suggestions: chips("Invoices"), isEnabled: true))
+    #expect(host.chips[0].title == "1  Invoices")
+    #expect(host.chips[0].isEnabled)
+    #expect(host.chips[0].accessibilityLabel()?.contains("Invoices") == true)
   }
 
-  /// A dialog that cannot be navigated dims the button rather than taking it away: a control
+  /// A dialog that cannot be navigated dims the chips rather than taking them away: a control
   /// that comes and goes under the pointer is worse than one that says no.
-  @Test func aDialogThatCannotBeNavigatedDimsTheButton() {
+  @Test func aDialogThatCannotBeNavigatedDimsTheChips() {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: false,
+        suggestions: chips("Invoices"), isEnabled: false,
         notice: Notice(.blocked, "Cannot change folder.")),
       at: placement(.below))
-    #expect(!host.button.isEnabled)
+    #expect(!host.chips[0].isEnabled)
     #expect(!host.suggestionIcon.isEnabled)
     #expect(!host.notice.isHidden)
     #expect(host.notice.stringValue == "Cannot change folder.")
 
-    host.update(PanelContents(destination: "Invoices", isEnabled: true))
+    host.update(PanelContents(suggestions: chips("Invoices"), isEnabled: true))
     #expect(host.noticeZone.isHidden)
   }
 
-  @Test func theButtonReportsThePress() {
+  @Test func theChipReportsThePress() {
     let host = PanelHost()
     let listener = Listener()
     host.actions = listener
-    host.update(PanelContents(destination: "Invoices", isEnabled: true))
-    host.button.performClick(nil)
+    host.update(PanelContents(suggestions: chips("Invoices"), isEnabled: true))
+    host.chips[0].performClick(nil)
     #expect(listener.presses == 1)
   }
 
@@ -94,8 +94,8 @@ struct PanelHostTests {
   /// is not a crash.
   @Test func aPressWithNoListenerDoesNothing() {
     let host = PanelHost()
-    host.update(PanelContents(destination: "Invoices", isEnabled: true))
-    host.button.performClick(nil)
+    host.update(PanelContents(suggestions: chips("Invoices"), isEnabled: true))
+    host.chips[0].performClick(nil)
     for control in host.historyButtons.values { control.performClick(nil) }
   }
 
@@ -107,7 +107,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         history: HistoryState(back: true, forward: false, returnToOriginal: true)),
       at: placement(.below))
     #expect(host.historyButtons[.back]?.isEnabled == true)
@@ -124,7 +124,7 @@ struct PanelHostTests {
     host.actions = listener
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         history: HistoryState(back: true, forward: true, returnToOriginal: true)),
       at: placement(.below))
 
@@ -148,13 +148,14 @@ struct PanelHostTests {
   /// or a folder to add. A star that opens an empty menu is a control that lies.
   @Test func theMenusZoneIsThereOnlyWhenItHasSomethingToOffer() {
     let host = PanelHost()
-    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.show(PanelContents(suggestions: chips("Invoices"), isEnabled: true), at: placement(.below))
     #expect(host.details[.menus] == nil || host.details[.menus] == .hidden)
     #expect(host.menusZone.isHidden)
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], folder: "/Users/ada"))
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices],
+        folder: "/Users/ada"))
     #expect(host.details[.menus] == .full)
     #expect(!host.menusZone.isHidden)
     #expect(!host.favoritesButton.isHidden && host.favoritesIcon.isHidden)
@@ -166,7 +167,8 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], folder: "/Users/ada"),
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices],
+        folder: "/Users/ada"),
       at: placement(.right, length: 400))
     #expect(host.details[.menus] == .icon)
     #expect(host.favoritesButton.isHidden && !host.favoritesIcon.isHidden)
@@ -180,7 +182,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices, reports],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices, reports],
         folder: "/Users/ada/Invoices", favoriteHere: "invoices"),
       at: placement(.below))
     let menu = host.favoritesMenu()
@@ -201,20 +203,20 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices],
         folder: "/Users/ada/Reports"),
       at: placement(.below))
     #expect(host.favoritesMenu()?.items.last?.title.contains("Reports") == true)
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices],
         folder: "/Users/ada/Invoices", favoriteHere: "invoices"))
     #expect(host.favoritesMenu()?.items.last?.title.contains("Invoices") == true)
 
     // A dialog whose folder is not known yet offers no add: there is nothing to name.
     host.update(
-      PanelContents(destination: "Invoices", isEnabled: true, favorites: [invoices]))
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices]))
     #expect(host.favoritesMenu()?.items.count == 1)
   }
 
@@ -225,7 +227,7 @@ struct PanelHostTests {
     host.actions = listener
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices, reports],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices, reports],
         folder: "/Users/ada/Reports"),
       at: placement(.below))
     var menu = host.favoritesMenu()!
@@ -236,7 +238,7 @@ struct PanelHostTests {
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices],
         folder: "/Users/ada/Invoices", favoriteHere: "invoices"))
     menu = host.favoritesMenu()!
     press(menu.items.last!)
@@ -250,7 +252,7 @@ struct PanelHostTests {
   @Test func theClockIsDrawnOnlyWhenThereAreRecents() {
     let host = PanelHost()
     host.show(
-      PanelContents(destination: "Invoices", isEnabled: true, favorites: [invoices]),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices]),
       at: placement(.below))
     #expect(!host.menusZone.isHidden)
     #expect(host.recentsButton.isHidden && host.recentsIcon.isHidden)
@@ -258,7 +260,7 @@ struct PanelHostTests {
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans]))
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices], recents: [scans]))
     #expect(host.details[.menus] == .full)
     #expect(!host.favoritesButton.isHidden && !host.recentsButton.isHidden)
   }
@@ -268,7 +270,7 @@ struct PanelHostTests {
   @Test func theZoneIsTheClockAloneWhenThereIsNothingElseToOffer() {
     let host = PanelHost()
     host.show(
-      PanelContents(destination: "Invoices", isEnabled: true, recents: [scans]),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, recents: [scans]),
       at: placement(.below))
     #expect(!host.menusZone.isHidden)
     #expect(host.favoritesButton.isHidden && host.favoritesIcon.isHidden)
@@ -277,7 +279,7 @@ struct PanelHostTests {
     // And down the side of a dialog there is room for one symbol, which is that one.
     let side = PanelHost()
     side.show(
-      PanelContents(destination: "Invoices", isEnabled: true, recents: [scans]),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, recents: [scans]),
       at: placement(.right, length: 400))
     #expect(side.details[.menus] == .icon)
     #expect(!side.recentsIcon.isHidden)
@@ -289,7 +291,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans]),
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices], recents: [scans]),
       at: placement(.right, length: 400))
     #expect(host.details[.menus] == .compact)
     #expect(!host.favoritesIcon.isHidden && !host.recentsIcon.isHidden)
@@ -297,7 +299,7 @@ struct PanelHostTests {
     let shorter = PanelHost()
     shorter.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans]),
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices], recents: [scans]),
       at: placement(.right, length: 180))
     #expect(shorter.details[.menus] == .icon)
     #expect(!shorter.favoritesIcon.isHidden && shorter.recentsIcon.isHidden)
@@ -309,7 +311,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, recents: [pinned, scans, otherScans]),
+        suggestions: chips("Invoices"), isEnabled: true, recents: [pinned, scans, otherScans]),
       at: placement(.below))
     let menu = host.recentsMenu()
     #expect(menu?.items.map(\.title) == ["Archive", "Scans", "Scans"])
@@ -324,7 +326,7 @@ struct PanelHostTests {
     let listener = Listener()
     host.actions = listener
     host.show(
-      PanelContents(destination: "Invoices", isEnabled: true, recents: [pinned, scans]),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, recents: [pinned, scans]),
       at: placement(.below))
     let menu = host.recentsMenu()!
     press(menu.items[1])
@@ -338,14 +340,14 @@ struct PanelHostTests {
   @Test func theWindowsMenuIsDrawnOnlyWhenThereAreWindows() {
     let host = PanelHost()
     host.show(
-      PanelContents(destination: "Invoices", isEnabled: true, favorites: [invoices]),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices]),
       at: placement(.below))
     #expect(host.windowsButton.isHidden && host.windowsIcon.isHidden)
     #expect(host.windowsMenu() == nil)
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices], recents: [scans],
         finderWindows: [documents]))
     #expect(host.details[.menus] == .full)
     #expect(!host.favoritesButton.isHidden && !host.recentsButton.isHidden)
@@ -358,7 +360,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, favorites: [invoices], recents: [scans],
+        suggestions: chips("Invoices"), isEnabled: true, favorites: [invoices], recents: [scans],
         finderWindows: [documents]),
       at: placement(.right, length: 180))
     #expect(host.details[.menus] == .icon)
@@ -367,7 +369,7 @@ struct PanelHostTests {
 
     let alone = PanelHost()
     alone.show(
-      PanelContents(destination: "Invoices", isEnabled: true, finderWindows: [documents]),
+      PanelContents(suggestions: chips("Invoices"), isEnabled: true, finderWindows: [documents]),
       at: placement(.right, length: 400))
     #expect(alone.details[.menus] == .icon)
     #expect(!alone.windowsIcon.isHidden)
@@ -381,7 +383,7 @@ struct PanelHostTests {
     host.actions = listener
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true, finderWindows: [documents, desktop]),
+        suggestions: chips("Invoices"), isEnabled: true, finderWindows: [documents, desktop]),
       at: placement(.below))
     let menu = host.windowsMenu()!
     #expect(menu.items.map(\.title) == ["Documents", "Desktop"])
@@ -397,14 +399,14 @@ struct PanelHostTests {
   /// alone; a pin in force is its name and time left, with the symbol filled (N4).
   @Test func theContextZoneShowsThePinAndItsTimeLeft() {
     let host = PanelHost()
-    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.show(PanelContents(suggestions: chips("Invoices"), isEnabled: true), at: placement(.below))
     #expect(host.details[.context] == nil || host.details[.context] == .hidden)
     #expect(host.contextZone.isHidden)
     #expect(host.pinMenu() == nil)
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         pin: PinOffer(folders: [PinnableFolder(path: "/Users/ada/Acme")])))
     #expect(host.details[.context] == .icon)
     #expect(!host.pinIcon.isHidden && host.pinButton.isHidden)
@@ -412,7 +414,7 @@ struct PanelHostTests {
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         pin: PinOffer(
           current: acmePin, remaining: .hours(2), contexts: [acme])))
     #expect(host.details[.context] == .full)
@@ -427,7 +429,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         pin: PinOffer(current: acmePin, remaining: .minutes(45), contexts: [acme])),
       at: placement(.right, length: 400))
     #expect(host.details[.context] == .icon)
@@ -442,7 +444,7 @@ struct PanelHostTests {
     host.actions = listener
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         pin: PinOffer(
           current: acmePin, remaining: nil, contexts: [acme],
           folders: [PinnableFolder(path: "/Users/ada/Scratch")])),
@@ -485,7 +487,7 @@ struct PanelHostTests {
     host.actions = listener
     host.show(
       PanelContents(
-        destination: "jilpa", isEnabled: true,
+        suggestions: chips("jilpa"), isEnabled: true,
         pin: PinOffer(folders: [PinnableFolder(path: "/Users/ada/src/jilpa")]),
         project: jilpaProject),
       at: placement(.below))
@@ -507,7 +509,8 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Downloads", isEnabled: true, project: ProjectOffer(.unknown(.tabsDisagree))),
+        suggestions: chips("Downloads"), isEnabled: true,
+        project: ProjectOffer(.unknown(.tabsDisagree))),
       at: placement(.below))
     #expect(host.projectButton.title == "Project unknown")
     #expect(
@@ -518,7 +521,7 @@ struct PanelHostTests {
 
     host.update(
       PanelContents(
-        destination: "Downloads", isEnabled: true,
+        suggestions: chips("Downloads"), isEnabled: true,
         project: ProjectOffer(.unsupported(appName: "Visual Studio Code"))))
     #expect(host.projectButton.title == "Visual Studio Code: not supported")
   }
@@ -528,7 +531,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         pin: PinOffer(current: acmePin, remaining: .hours(2), contexts: [acme]),
         project: jilpaProject),
       at: placement(.below))
@@ -565,7 +568,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         notice: Notice(.unavailable, "Reports is not there any more.")),
       at: placement(.below))
     #expect(!host.noticeZone.isHidden)
@@ -580,14 +583,15 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         notice: Notice(.recovery, "Its Go to Folder box is still open.")),
       at: placement(.below))
     #expect(host.noticeSymbol.contentTintColor == .systemOrange)
 
     host.update(
       PanelContents(
-        destination: "Invoices", isEnabled: true, notice: Notice(.working, "Going to Invoices…")))
+        suggestions: chips("Invoices"), isEnabled: true,
+        notice: Notice(.working, "Going to Invoices…")))
     #expect(host.noticeSymbol.contentTintColor == nil)
   }
 
@@ -614,34 +618,34 @@ struct PanelHostTests {
 
   // MARK: - Sharing the strip
 
-  /// The wireframe's collapse, from the outside: a strip with room draws the destination's
-  /// name, and one without draws the folder symbol in its place rather than dropping the zone.
+  /// The wireframe's collapse, from the outside: a strip with room draws the chip's name, and
+  /// one without draws the folder symbol in its place rather than dropping the zone.
   @Test func aStripWithRoomDrawsEveryZoneWhole() {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         notice: Notice(.unavailable, "Reports is not there any more."),
         history: HistoryState(back: true)),
       at: placement(.below, length: 900))
     #expect(host.details[.history] == .full)
     #expect(host.details[.suggestions] == .full)
     #expect(host.details[.notice] == .full)
-    #expect(!host.button.isHidden && host.suggestionIcon.isHidden)
+    #expect(!host.chips[0].isHidden && host.suggestionIcon.isHidden)
     #expect(!host.notice.isHidden)
   }
 
   /// A zone gives up detail before any zone gives up its place, and the suggestions give up
   /// first of the two that are drawn here: the history controls are what a narrow dialog still
-  /// needs, and a folder symbol still navigates.
+  /// needs, and a folder symbol still opens every chip.
   @Test func aNarrowStripCollapsesTheChipBeforeTheHistory() {
     let host = PanelHost()
     host.show(
-      PanelContents(destination: "Quarterly Invoices Awaiting Approval", isEnabled: true),
+      PanelContents(suggestions: chips("Quarterly Invoices Awaiting Approval"), isEnabled: true),
       at: placement(.below, length: 130))
     #expect(host.details[.suggestions] == .icon)
     #expect(host.details[.history] != .hidden)
-    #expect(host.button.isHidden && !host.suggestionIcon.isHidden)
+    #expect(host.chips[0].isHidden && !host.suggestionIcon.isHidden)
     // The name is gone from the strip but not from the keyboard or from VoiceOver.
     #expect(
       host.suggestionIcon.accessibilityLabel()?.contains("Quarterly Invoices Awaiting Approval")
@@ -654,13 +658,13 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         notice: Notice(.unavailable, "Reports is not there any more.")),
       at: placement(.right, length: 400))
     #expect(host.zones.orientation == .vertical)
     #expect(host.details[.suggestions] == .icon)
     #expect(host.details[.notice] == .icon)
-    #expect(host.button.isHidden && host.notice.isHidden)
+    #expect(host.chips[0].isHidden && host.notice.isHidden)
     #expect(host.noticeSymbol.accessibilityLabel() == "Reports is not there any more.")
   }
 
@@ -670,7 +674,7 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Quarterly Invoices Awaiting Approval", isEnabled: true,
+        suggestions: chips("Quarterly Invoices Awaiting Approval"), isEnabled: true,
         notice: Notice(.unavailable, "Reports is not there any more."),
         history: HistoryState(back: true, forward: true, returnToOriginal: true)),
       at: placement(.below, length: 160))
@@ -679,13 +683,114 @@ struct PanelHostTests {
     #expect(host.historyButtons[.back]?.isHidden == false)
   }
 
+  // MARK: - The suggestions
+
+  /// The wireframe's three chips, each with its pick number, and its reason where a pointer and
+  /// VoiceOver find it (N1, N2).
+  @Test func everyChipCarriesItsNumberItsNameAndItsReason() {
+    let host = PanelHost()
+    let offered = [
+      SuggestionChip(
+        pick: 1, path: "/Users/ada/Exports", reason: .named(.explicitDefault(forPurpose: true))),
+      SuggestionChip(
+        pick: 2, path: "/Users/ada/Invoices",
+        reason: .ranked(
+          SignalEvidence(
+            signal: .appPurpose, source: .destinationStats, strength: 0.6, contribution: 1.2,
+            uses: 12))),
+      SuggestionChip(
+        pick: 3, path: "/Users/ada/jilpa",
+        reason: .ranked(
+          SignalEvidence(
+            signal: .project, source: "terminal.shell-cwd", strength: 1, contribution: 1.5,
+            label: "jilpa"))),
+    ]
+    host.show(
+      PanelContents(suggestions: offered, isEnabled: true), at: placement(.below, length: 900))
+    #expect(host.details[.suggestions] == .full)
+    #expect(host.chips.map(\.title) == ["1  Exports", "2  Invoices", "3  jilpa"])
+    #expect(host.chips.allSatisfy { !$0.isHidden })
+    #expect(host.moreButton.isHidden && host.suggestionIcon.isHidden)
+    #expect(host.chips[1].accessibilityLabel()?.contains("Suggestion 2") == true)
+    #expect(host.chips[1].toolTip?.contains("/Users/ada/Invoices") == true)
+    #expect(host.chips[1].toolTip?.contains("12") == true)
+    #expect(host.chips[2].accessibilityLabel()?.contains("jilpa") == true)
+  }
+
+  /// A chip past the number of suggestions is not drawn, and a press reports its own number.
+  @Test func fewerSuggestionsDrawFewerChipsAndEachReportsItsNumber() {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    host.show(
+      PanelContents(suggestions: chips("Invoices", "Scans"), isEnabled: true),
+      at: placement(.below, length: 900))
+    #expect(!host.chips[0].isHidden && !host.chips[1].isHidden && host.chips[2].isHidden)
+    host.chips[1].performClick(nil)
+    host.chips[0].performClick(nil)
+    #expect(listener.picks == [2, 1])
+  }
+
+  /// A cold start: nothing to offer, and the zone asks for no room rather than drawing a folder
+  /// nobody has a reason to offer (N1).
+  @Test func aColdStartDrawsNoSuggestionsZone() {
+    let host = PanelHost()
+    host.show(
+      PanelContents(isEnabled: true, history: HistoryState(back: true)),
+      at: placement(.below, length: 900))
+    #expect(host.details[.suggestions] == nil)
+    #expect(host.suggestionZone.isHidden)
+    #expect(host.suggestionsMenu() == nil)
+  }
+
+  /// The wireframe's middle step: one chip and a count, and the count opens every chip.
+  @Test func aShorterStripDrawsOneChipAndACount() throws {
+    let host = PanelHost()
+    let listener = Listener()
+    host.actions = listener
+    let long = chips(
+      "Quarterly Invoices Awaiting Approval", "Receipts From The Accountant", "Scans")
+    // Measured from the views themselves: room for the first chip and the count beside the
+    // history zone at its smallest, which every strip keeps, and less than three chips need.
+    host.update(PanelContents(suggestions: long, isEnabled: true))
+    let width = { (control: NSView) in max(control.fittingSize.width, PanelHost.controlLength) }
+    let compact = width(host.chips[0]) + PanelHost.controlSpacing + width(host.moreButton)
+    let history = 2 * PanelHost.controlLength + PanelHost.controlSpacing
+    host.show(
+      PanelContents(suggestions: long, isEnabled: true),
+      at: placement(
+        .below, length: compact + history + PanelHost.zoneSpacing + 2 * PanelHost.inset + 2))
+    #expect(host.details[.suggestions] == .compact)
+    #expect(!host.chips[0].isHidden && host.chips[1].isHidden && host.chips[2].isHidden)
+    #expect(!host.moreButton.isHidden && host.moreButton.title == "+2")
+    #expect(host.suggestionIcon.isHidden)
+
+    let menu = try #require(host.suggestionsMenu())
+    #expect(
+      menu.items.map(\.title)
+        == ["Quarterly Invoices Awaiting Approval", "Receipts From The Accountant", "Scans"])
+    #expect(menu.items.map(\.tag) == [1, 2, 3])
+    menu.performActionForItem(at: 2)
+    #expect(listener.picks == [3])
+  }
+
+  /// The menu the collapsed zone opens says no while the dialog cannot be navigated, as the
+  /// chips do.
+  @Test func theSuggestionsMenuDimsWithTheChips() throws {
+    let host = PanelHost()
+    host.update(PanelContents(suggestions: chips("Invoices", "Scans"), isEnabled: false))
+    let menu = try #require(host.suggestionsMenu())
+    #expect(menu.items.allSatisfy { !$0.isEnabled })
+    #expect(!host.moreButton.isEnabled && !host.suggestionIcon.isEnabled)
+  }
+
   // MARK: - Following the dialog
 
   /// The move-and-resize path runs once per display refresh for as long as a drag lasts, so it
   /// does the frame, the side and the fit a new length changes, and nothing else.
   @Test func movingTakesTheFrameAndTheSideAndLeavesTheContents() {
     let host = PanelHost()
-    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.show(PanelContents(suggestions: chips("Invoices"), isEnabled: true), at: placement(.below))
     #expect(host.zones.orientation == .horizontal)
 
     let side = CGRect(x: 600, y: 200, width: PanelHost.thickness, height: 400)
@@ -693,7 +798,7 @@ struct PanelHostTests {
     #expect(host.window.frame == side)
     #expect(host.zones.orientation == .vertical)
     // The contents were never touched.
-    #expect(host.button.title == "Invoices" && host.isVisible)
+    #expect(host.chips[0].title == "1  Invoices" && host.isVisible)
   }
 
   /// The dialog is still there: its app is not in front, or it is being dragged under the
@@ -703,12 +808,12 @@ struct PanelHostTests {
     let host = PanelHost()
     host.show(
       PanelContents(
-        destination: "Invoices", isEnabled: true,
+        suggestions: chips("Invoices"), isEnabled: true,
         notice: Notice(.unavailable, "Read-only folder.")),
       at: placement(.below))
     host.withdraw(fading: false)
     #expect(!host.isVisible)
-    #expect(host.button.title == "Invoices" && host.notice.stringValue == "Read-only folder.")
+    #expect(host.chips[0].title == "1  Invoices" && host.notice.stringValue == "Read-only folder.")
 
     host.move(to: placement(.below))
     #expect(host.isVisible && host.window.alphaValue == 1)
@@ -726,7 +831,7 @@ struct PanelHostTests {
   /// strip brought back is at full alpha and on screen the moment it is moved.
   @Test func aStripShownAgainDuringAFadeIsWhole() {
     let host = PanelHost()
-    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.show(PanelContents(suggestions: chips("Invoices"), isEnabled: true), at: placement(.below))
     host.withdraw(fading: true)
     host.move(to: placement(.below), fading: true)
     #expect(host.isVisible && host.window.alphaValue == 1)
@@ -737,7 +842,7 @@ struct PanelHostTests {
   @Test func hidingForgetsWhatTheStripSaid() {
     let host = PanelHost()
     let contents = PanelContents(
-      destination: "Invoices", isEnabled: true, notice: Notice(.working, "Saved."))
+      suggestions: chips("Invoices"), isEnabled: true, notice: Notice(.working, "Saved."))
     host.show(contents, at: placement(.below))
     host.hide()
 
@@ -804,7 +909,7 @@ struct PanelHostTests {
     #expect(host.jump.superview == nil)
     #expect(host.isVisible && host.window.alphaValue == 1)
     // What the strip said is what it says again.
-    #expect(host.button.title == "Invoices")
+    #expect(host.chips[0].title == "1  Invoices")
   }
 
   /// The dialog moved, or its app went away, while the field was up. The jump does not follow
@@ -818,7 +923,7 @@ struct PanelHostTests {
     #expect(host.window.frame == box.frame)
     host.withdraw(fading: false)
     #expect(host.isVisible && host.window.frame == box.frame)
-    host.update(PanelContents(destination: "Reports", isEnabled: true))
+    host.update(PanelContents(suggestions: chips("Reports"), isEnabled: true))
     #expect(host.window.frame == box.frame)
   }
 
@@ -934,7 +1039,7 @@ struct PanelHostTests {
   @Test func eachKeystrokeIsTimed() {
     let stats = IntervalStats()
     let host = PanelHost(signposts: Signposts(stats: stats))
-    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.show(PanelContents(suggestions: chips("Invoices"), isEnabled: true), at: placement(.below))
     host.openJump(state(), at: jump())
     host.jump.field.stringValue = "inv"
     host.jump.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
@@ -969,7 +1074,7 @@ struct PanelHostTests {
   /// while a supported dialog has the keys (contract 2).
   private func shown() -> PanelHost {
     let host = PanelHost()
-    host.show(PanelContents(destination: "Invoices", isEnabled: true), at: placement(.below))
+    host.show(PanelContents(suggestions: chips("Invoices"), isEnabled: true), at: placement(.below))
     return host
   }
 
@@ -999,6 +1104,13 @@ struct PanelHostTests {
   }
 }
 
+/// Chips for the given folder names, numbered in order, as the presenter would hand them over.
+private func chips(_ names: String...) -> [SuggestionChip] {
+  names.enumerated().map { index, name in
+    SuggestionChip(pick: index + 1, path: "/Users/ada/\(name)", reason: .named(nil))
+  }
+}
+
 @MainActor
 private final class Listener: PanelActions {
   var presses = 0
@@ -1009,7 +1121,11 @@ private final class Listener: PanelActions {
   var added = 0
   var removed: [FavoriteID] = []
   var recents: [String] = []
-  func panelChoseDestination() { presses += 1 }
+  var picks: [Int] = []
+  func panelChoseSuggestion(_ pick: Int) {
+    picks.append(pick)
+    presses += 1
+  }
   func panelChoseHistory(_ move: HistoryMove) { moves.append(move) }
   func panelChoseJump(_ choice: JumpChoice) { chosen.append(choice) }
   func panelClosedJump() { closes += 1 }
