@@ -21,6 +21,7 @@ NOTARIZE=0
 PROFILE="${JILPA_NOTARY_PROFILE:-jilpa-notary}"
 VERSION=""
 BUNDLE_ID=""
+EMBED=""
 
 usage() {
   cat <<'EOF'
@@ -35,6 +36,11 @@ usage: Scripts/make-app.sh [options]
   --sign <how>            developer-id | adhoc | "<identity>"   (default developer-id)
   --notarize              Submit to the notary service, wait, staple and assess
   --profile <name>        notarytool keychain profile           (default jilpa-notary)
+  --embed <app>           Put an already built helper app in Contents/Helpers and sign it
+                          with the same identity. Onboarding's demo:
+                            Scripts/make-app.sh --product FixtureApp --name JilpaDemo \
+                              --plist App/Demo/Info.plist --entitlements none --sign adhoc
+                            Scripts/make-app.sh --embed dist/JilpaDemo.app --sign adhoc
 EOF
 }
 
@@ -49,6 +55,7 @@ while [ $# -gt 0 ]; do
     --sign) SIGN="$2"; shift 2 ;;
     --notarize) NOTARIZE=1; shift ;;
     --profile) PROFILE="$2"; shift 2 ;;
+    --embed) EMBED="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -92,6 +99,11 @@ plist_get() { /usr/libexec/PlistBuddy -c "Print :$1" "$APP/Contents/Info.plist";
 VERSION=$(plist_get CFBundleShortVersionString)
 EXECUTABLE=$(plist_get CFBundleExecutable)
 cp "$BIN_DIR/$PRODUCT" "$APP/Contents/MacOS/$EXECUTABLE"
+if [ -n "$EMBED" ]; then
+  [ -d "$EMBED" ] || { echo "no helper app at $EMBED" >&2; exit 1; }
+  mkdir -p "$APP/Contents/Helpers"
+  ditto "$EMBED" "$APP/Contents/Helpers/$(basename "$EMBED")"
+fi
 
 step "Signing as ${IDENTITY/#-/ad hoc}"
 SIGN_ARGS=(--force --options runtime --sign "$IDENTITY")
@@ -99,6 +111,11 @@ if [ "$SIGN" = adhoc ]; then
   SIGN_ARGS+=(--timestamp=none)
 else
   SIGN_ARGS+=(--timestamp)
+fi
+# A helper is signed first, inside out, with the identity and runtime of the outer app and none
+# of its entitlements: the demo needs none, and a nested app is never signed by --deep.
+if [ -n "$EMBED" ]; then
+  codesign "${SIGN_ARGS[@]}" "$APP/Contents/Helpers/$(basename "$EMBED")"
 fi
 [ "$ENTITLEMENTS" != none ] && SIGN_ARGS+=(--entitlements "$ENTITLEMENTS")
 codesign "${SIGN_ARGS[@]}" "$APP"

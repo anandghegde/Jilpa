@@ -46,6 +46,8 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   }
   /// A health row's fix chosen (S11). The app opens the place; the menu only says which.
   public var onFixHealth: ((HealthFix) -> Void)?
+  /// Welcome to Jilpa, chosen: the onboarding window again (S11).
+  public var onShowWelcome: (() -> Void)?
   /// Release Pin, from the menu bar.
   public var onReleaseContextPin: (() -> Void)? {
     get { pinMenu.onRelease }
@@ -258,6 +260,11 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
     if let controls { addControls(controls) }
 
     menu.addItem(.separator())
+    let welcome = NSMenuItem(
+      title: String(localized: "Welcome to Jilpa…"), action: #selector(welcomePressed),
+      keyEquivalent: "")
+    welcome.target = self
+    menu.addItem(welcome)
     menu.addItem(
       NSMenuItem(
         title: String(localized: "Quit Jilpa"),
@@ -292,6 +299,8 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       menu.addItem(row)
     }
   }
+
+  @objc private func welcomePressed() { onShowWelcome?() }
 
   @objc private func healthFixPressed(_ sender: NSMenuItem) {
     guard let raw = sender.representedObject as? String, let fix = HealthFix(rawValue: raw)

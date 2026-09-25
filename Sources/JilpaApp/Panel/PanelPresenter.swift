@@ -153,6 +153,17 @@ public final class PanelPresenter: PanelActions {
   /// A dialog of this app went stale because its host stopped answering and its breaker opened
   /// while the dialog was open.
   public var onHostNotAnswering: ((AppProcess) -> Void)?
+  /// A move in a dialog of this app arrived, verified. Onboarding's demo waits for one (S11).
+  public var onArrived: ((AppProcess) -> Void)?
+
+  /// Onboarding's demo (S11): in a dialog of this app, and only there, the first chip is this
+  /// folder. The demo app is Jilpa's own and the folder is one Jilpa made for it, so this is not
+  /// a suggestion made up for a user's dialog; nil outside onboarding.
+  public var demo: (app: AppID, folder: URL)?
+
+  /// Whether a dialog is under the strip. The app asks before it activates itself for its own
+  /// window, which it never does while one is open (contract 2).
+  public var hasDialog: Bool { shown != nil }
 
   /// Whether a folder is a git root, asked only under a developer-context permit. A closure so
   /// the presenter can be exercised without a disk.
@@ -466,9 +477,10 @@ public final class PanelPresenter: PanelActions {
   /// The chips this dialog's strip draws: what resolution named, or the caller's folder when
   /// nothing was, then the ranked set less the folder the dialog is in (`SuggestionChips`).
   private func chips(for shown: Shown) -> [SuggestionChip] {
+    let demoFolder = demo.flatMap { shown.app.app == $0.app ? $0.folder : nil }
     let named =
       shown.named
-      ?? destination.map {
+      ?? (destination ?? demoFolder).map {
         NamedDestination(location: LocationRef(path: $0.path, lineage: []), trigger: nil)
       }
     return SuggestionChips.choose(
@@ -1101,6 +1113,7 @@ public final class PanelPresenter: PanelActions {
     var place: LocationRef?
     if case .arrived(let verified) = result {
       arrival = verified.reading
+      onArrived?(target.app)
       place = await locate(verified.folder)
       // Before `endNavigation`, so the reading it announces finds the history already there and
       // reads as the same folder rather than as a navigation of its own. A move that did not

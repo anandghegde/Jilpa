@@ -20,6 +20,8 @@ swift run jilpa-soak read            # live dialog reader against FixtureApp, sa
 swift run jilpa-soak coordinate      # live watcher-to-coordinator chain against FixtureApp; Go to Folder to the fixture's own service, never confirms
 swift run jilpa-soak outcome         # live outcome detection against FixtureApp; the fixture presses its own buttons, the tool sends nothing
 Scripts/make-app.sh --sign adhoc     # dist/Jilpa.app for local use
+Scripts/make-app.sh --product FixtureApp --name JilpaDemo --plist App/Demo/Info.plist --entitlements none --sign adhoc
+Scripts/make-app.sh --embed dist/JilpaDemo.app --sign adhoc   # Jilpa.app with onboarding's demo inside
 Scripts/make-app.sh --notarize       # Developer ID, hardened runtime, notarized and stapled zip
 ```
 

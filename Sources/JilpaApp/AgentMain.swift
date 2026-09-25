@@ -41,6 +41,8 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   /// What needs attention (S11), and the grant it starts from.
   private var health: HealthCenter?
   private var trust: AccessibilityTrustWatch?
+  /// The welcome window and its demo (S11).
+  private var onboarding: OnboardingCenter?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Before any AX call: a timeout set per app element does not reach the elements that app vends.
@@ -132,9 +134,22 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     trust.start { [weak self] trusted in
       if trusted { self?.startAgent() } else { self?.stopAgent() }
       self?.health?.refresh()
+      self?.onboarding?.grantChanged(trusted)
     }
     if trust.isTrusted { startAgent() }
     health.refresh()
+
+    // Onboarding opens by itself on the first launch only; after that it is the menu's.
+    let onboarding = OnboardingCenter(
+      actions: OnboardingCenter.Actions(
+        trusted: { [weak self] in self?.trust?.isTrusted ?? false },
+        checkGrant: { [weak self] in self?.trust?.check() },
+        requestAccess: { AXTrust.requestWithPrompt() },
+        mayActivate: { [weak self] in self?.agent?.hasDialog != true },
+        setDemo: { [weak self] demo in self?.agent?.setDemo(demo) }))
+    self.onboarding = onboarding
+    statusItem.onShowWelcome = { [weak self] in self?.onboarding?.show() }
+    onboarding.showIfFirstLaunch()
   }
 
   /// Everything that watches dialogs, made when the grant is there and not before.
@@ -156,6 +171,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
       self?.health?.refresh()
     }
     agent.onAppHealthChange = { [weak self] in self?.health?.refresh() }
+    agent.onArrived = { [weak self] app in self?.onboarding?.arrived(in: app) }
     statusItem.setControls(agent.menuControls())
     agent.start()
   }
@@ -310,6 +326,8 @@ final class DialogAgent {
   var onFinderWindowsChange: (() -> Void)?
   /// Something the health view says about one app moved (S11).
   var onAppHealthChange: (() -> Void)?
+  /// A move arrived in a dialog of this app. Onboarding's demo waits for one (S11).
+  var onArrived: ((AppID) -> Void)?
   /// The apps whose dialogs lately got nothing, and why. Held here and in memory only.
   private var appHealth = AppHealthLog()
 
@@ -412,6 +430,10 @@ final class DialogAgent {
       self?.note(app, problem)
     }
     presenter.onHostNotAnswering = { [weak self] app in self?.note(app, .notAnswering) }
+    presenter.onArrived = { [weak self] app in
+      guard let id = app.app else { return }
+      self?.onArrived?(id)
+    }
     presenter.onRecognized = { [weak self] app in
       guard let self, let id = app.app else { return }
       let before = self.appHealth
@@ -471,6 +493,13 @@ final class DialogAgent {
   }
 
   var hasStore: Bool { store != nil }
+
+  /// Whether a dialog is under the strip, which is when Jilpa never brings a window of its own
+  /// forward (contract 2).
+  var hasDialog: Bool { presenter.hasDialog }
+
+  /// Onboarding's demo: the folder the demo app's dialogs offer as their first chip, or none.
+  func setDemo(_ demo: (app: AppID, folder: URL)?) { presenter.demo = demo }
 
   /// The per-app rows, with "not answering" kept only for apps that still run.
   func appProblems() -> [AppHealth] {
