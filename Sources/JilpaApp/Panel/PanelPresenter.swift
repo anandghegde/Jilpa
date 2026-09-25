@@ -80,7 +80,7 @@ public final class PanelPresenter: PanelActions {
   private let clock: PollClock
   /// The side of the dialog the strip prefers. `PanelDocking` falls back from it in a fixed
   /// order when it would leave the screen.
-  private let preferred: DockSide
+  public private(set) var preferred: DockSide
   /// Which app is in front. Never `NSApp.isActive` and never the system-wide
   /// `AXFocusedApplication`: while fuzzy jump holds key status both name Jilpa although no
   /// activation was delivered and the host is still frontmost (spike 3b).
@@ -545,6 +545,14 @@ public final class PanelPresenter: PanelActions {
   /// The folder the dialog under the strip is in, as the last reading named it. The pin chord
   /// pins it when nothing is pinned (`PinHotkey`).
   public var dialogFolder: String? { shown.flatMap { trails[$0.id]?.place?.path } }
+
+  /// The side the strip prefers, chosen in Settings (S10). The strip moves at once if a dialog
+  /// is under it; nothing is sent to the dialog.
+  public func setPreferredSide(_ side: DockSide) {
+    guard side != preferred else { return }
+    preferred = side
+    refresh()
+  }
 
   /// The pin moved, or its time left ticked down. The strip redraws; nothing is sent.
   public func pinsChanged() { apply() }

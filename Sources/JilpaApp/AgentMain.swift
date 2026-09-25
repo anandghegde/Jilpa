@@ -43,6 +43,8 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
   private var trust: AccessibilityTrustWatch?
   /// The welcome window and its demo (S11).
   private var onboarding: OnboardingCenter?
+  /// The Settings window (S10).
+  private var settings: SettingsCenter?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Before any AX call: a timeout set per app element does not reach the elements that app vends.
@@ -108,8 +110,12 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     // One listener for the whole fan-out, so the surfaces cannot disagree about the order they
     // were told in. The agent may not exist; the menu bar always does.
     config.onChange { [weak self] change in
-      // Errors and warnings are the health view's whatever else moved.
-      defer { self?.health?.refresh() }
+      // Errors and warnings are the health view's whatever else moved, and Settings shows the
+      // files as they are now.
+      defer {
+        self?.health?.refresh()
+        self?.settings?.refresh()
+      }
       guard change.contains(.model) else { return }
       self?.statusItem?.setFavorites(config.favorites)
       self?.agent?.configChanged(config)
@@ -149,6 +155,13 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         setDemo: { [weak self] demo in self?.agent?.setDemo(demo) }))
     self.onboarding = onboarding
     statusItem.onShowWelcome = { [weak self] in self?.onboarding?.show() }
+
+    let settings = SettingsCenter(
+      config: config, agent: { [weak self] in self?.agent },
+      showWelcome: { [weak self] in self?.onboarding?.show() },
+      mayActivate: { [weak self] in self?.agent?.hasDialog != true })
+    self.settings = settings
+    statusItem.onShowSettings = { [weak self] in self?.settings?.show() }
     onboarding.showIfFirstLaunch()
   }
 
@@ -165,7 +178,9 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
     // The same for private mode and the pauses, which also redraw the menu bar's own icon.
     agent.onControlsChange = { [weak self] in
       self?.statusItem?.setControls(self?.agent?.menuControls())
+      self?.settings?.refresh()
     }
+    agent.setPreferredSide(SettingsCenter.storedSide())
     agent.onFinderWindowsChange = { [weak self] in
       self?.showFinderWindows()
       self?.health?.refresh()
@@ -500,6 +515,36 @@ final class DialogAgent {
 
   /// Onboarding's demo: the folder the demo app's dialogs offer as their first chip, or none.
   func setDemo(_ demo: (app: AppID, folder: URL)?) { presenter.demo = demo }
+
+  // MARK: - What Settings asks for (S10)
+
+  func setPreferredSide(_ side: DockSide) { presenter.setPreferredSide(side) }
+
+  /// Everything the store may show now, as JSON for the user to read. The same filter as every
+  /// read, so an exclusion or private mode leaves out what it leaves out elsewhere, and the
+  /// export says how many rows it withheld.
+  func exportActivity() async -> Data? {
+    guard let store else { return nil }
+    let context = GateContext(state: policy.state, app: nil)
+    guard let export = try? await store.export(for: .ui, context) else { return nil }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    return try? encoder.encode(export)
+  }
+
+  /// Erase activity (the store's own promise): every table emptied but the identities of
+  /// configured folders. The recents are read again, which now finds nothing.
+  func eraseActivity() async -> Bool {
+    guard let store else { return false }
+    do {
+      try await store.erase()
+    } catch {
+      return false
+    }
+    recents?.refresh(policy.state)
+    return true
+  }
 
   /// The per-app rows, with "not answering" kept only for apps that still run.
   func appProblems() -> [AppHealth] {

@@ -48,6 +48,8 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   public var onFixHealth: ((HealthFix) -> Void)?
   /// Welcome to Jilpa, chosen: the onboarding window again (S11).
   public var onShowWelcome: (() -> Void)?
+  /// Settings…, chosen (S10).
+  public var onShowSettings: (() -> Void)?
   /// Release Pin, from the menu bar.
   public var onReleaseContextPin: (() -> Void)? {
     get { pinMenu.onRelease }
@@ -265,6 +267,11 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
       keyEquivalent: "")
     welcome.target = self
     menu.addItem(welcome)
+    let settings = NSMenuItem(
+      title: String(localized: "Settings…"), action: #selector(settingsPressed),
+      keyEquivalent: ",")
+    settings.target = self
+    menu.addItem(settings)
     menu.addItem(
       NSMenuItem(
         title: String(localized: "Quit Jilpa"),
@@ -301,6 +308,7 @@ public final class StatusItemController: NSObject, NSMenuDelegate {
   }
 
   @objc private func welcomePressed() { onShowWelcome?() }
+  @objc private func settingsPressed() { onShowSettings?() }
 
   @objc private func healthFixPressed(_ sender: NSMenuItem) {
     guard let raw = sender.representedObject as? String, let fix = HealthFix(rawValue: raw)
